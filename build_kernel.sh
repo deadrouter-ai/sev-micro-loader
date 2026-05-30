@@ -50,6 +50,10 @@ scripts/config --enable CONFIG_SLAB_FREELIST_RANDOM
 scripts/config --enable CONFIG_SLAB_FREELIST_HARDENED
 scripts/config --enable CONFIG_HARDENED_USERCOPY
 scripts/config --enable CONFIG_FORTIFY_SOURCE
+scripts/config --enable CONFIG_RANDOMIZE_KSTACK_OFFSET_DEFAULT
+scripts/config --enable CONFIG_ZERO_CALL_USED_REGS
+scripts/config --enable CONFIG_IOMMU_DEFAULT_DMA_STRICT
+scripts/config --disable CONFIG_SLAB_MERGE_DEFAULT
 
 # 6. Exploit Mitigation
 scripts/config --enable CONFIG_PANIC_ON_OOPS
@@ -59,6 +63,40 @@ scripts/config --enable CONFIG_SECURITY_DMESG_RESTRICT
 scripts/config --enable CONFIG_SECURITY_LOCKDOWN_LSM
 scripts/config --enable CONFIG_SECURITY_LOCKDOWN_LSM_EARLY
 scripts/config --set-str CONFIG_LSM "lockdown,yama,bpf"
+
+# 8. Strip massive unnecessary subsystems
+scripts/config --disable CONFIG_SOUND
+scripts/config --disable CONFIG_WLAN
+scripts/config --disable CONFIG_BT
+scripts/config --disable CONFIG_DRM
+scripts/config --disable CONFIG_FB
+scripts/config --disable CONFIG_USB
+scripts/config --disable CONFIG_USER_NS
+scripts/config --disable CONFIG_COREDUMP
+scripts/config --disable CONFIG_KEXEC
+scripts/config --disable CONFIG_KEXEC_FILE
+scripts/config --disable CONFIG_SUSPEND
+scripts/config --disable CONFIG_HIBERNATION
+scripts/config --disable CONFIG_NET_VENDOR_INTEL
+scripts/config --disable CONFIG_NET_VENDOR_AMD
+scripts/config --disable CONFIG_NET_VENDOR_BROADCOM
+scripts/config --disable CONFIG_NET_VENDOR_REALTEK
+scripts/config --disable CONFIG_WIRELESS
+scripts/config --disable CONFIG_ATA
+scripts/config --disable CONFIG_SCSI_LOWLEVEL
+scripts/config --disable CONFIG_INPUT_MOUSE
+scripts/config --disable CONFIG_INPUT_JOYSTICK
+scripts/config --disable CONFIG_INPUT_TOUCHSCREEN
+scripts/config --disable CONFIG_FAT_FS
+scripts/config --disable CONFIG_NTFS_FS
+scripts/config --disable CONFIG_NETWORK_FILESYSTEMS
+scripts/config --disable CONFIG_MISC_FILESYSTEMS
+
+# 9. Nuke Debugging Info
+scripts/config --disable CONFIG_DEBUG_INFO
+scripts/config --enable CONFIG_DEBUG_INFO_NONE
+scripts/config --disable CONFIG_DEBUG_KERNEL
+scripts/config --disable CONFIG_KALLSYMS_ALL
 
 echo "Resolving dependencies and finalizing configuration..."
 make olddefconfig
@@ -71,6 +109,4 @@ export SOURCE_DATE_EPOCH=0
 make -j$(nproc) bzImage
 
 echo ""
-echo "Done! Your custom kernel is at: linux-${KERNEL_VER}/arch/x86/boot/bzImage"
-echo "Run QEMU with:"
-echo "qemu-system-x86_64 -kernel linux-${KERNEL_VER}/arch/x86/boot/bzImage -append 'console=ttyS0 ip=dhcp' ..."
+echo "Done! Kernel is at: linux-${KERNEL_VER}/arch/x86/boot/bzImage"

@@ -2,6 +2,8 @@ name: Build and Release Confidential Micro-Loader
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
 
@@ -20,7 +22,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt update
-          sudo apt install -y build-essential flex bison libssl-dev libelf-dev wget rpm2cpio cpio jq python3 python3-pip
+          sudo apt install -y build-essential flex bison libssl-dev libelf-dev wget rpm2cpio cpio jq python3 python3-pip ccache
 
       - name: Setup Rust Toolchain
         run: |
@@ -28,10 +30,28 @@ jobs:
           rustup default 1.95.0
           rustup target add x86_64-unknown-linux-musl
 
+      - name: Cache Kernel ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ${{ runner.os }}-kernel-ccache-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-kernel-ccache-
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          target-dir: target
+
       - name: Build Linux Kernel (bzImage)
         run: |
+          export PATH="/usr/lib/ccache:$PATH"
+          export CCACHE_DIR=~/.cache/ccache
+          ccache -M 2G
+          ccache -z
           chmod +x build_kernel.sh
           ./build_kernel.sh
+          ccache -s
 
       - name: Build Rust Bootloader
         run: |
@@ -86,6 +106,7 @@ jobs:
           echo "SNP_HASH=$SNP_HASH" >> $GITHUB_ENV
 
       - name: Generate Release Notes
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           cat <<EOF > release_notes.md
           ## Confidential Micro-Loader Release
@@ -106,6 +127,7 @@ jobs:
           EOF
 
       - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           body_path: release_notes.md
