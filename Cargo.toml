@@ -1,0 +1,32 @@
+[package]
+name = "sev-micro-loader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Pure Rust async runtime and network client (bypassing native OpenSSL)
+tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "fs", "time", "net", "io-util", "signal", "process", "full"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+
+# Embedded TLS root certificates (Mozilla CA store baked into the binary)
+# Required because initramfs has no /etc/ssl/certs — no system CA bundle exists.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+webpki-roots = "1.0"
+
+# Cryptography and Hashing
+sha2 = "0.11"
+ed25519-dalek = "2"
+
+# Hex encoding for hash display
+hex = "0.4"
+
+# Low-level Linux system calls for mounting filesystems, ioctl, fork
+nix = { version = "0.31", features = ["fs", "mount", "process"] }
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
