@@ -36,7 +36,7 @@ $DOCKER run --rm --network host \
         ccache -s
         
         # 2. Build Rust Bootloader
-        CC_x86_64_unknown_linux_musl=musl-gcc RUSTFLAGS=\"--remap-path-prefix \$(pwd)=/workspace\" cargo build --release --target x86_64-unknown-linux-musl
+        CC_x86_64_unknown_linux_musl=musl-gcc RUSTFLAGS=\"--remap-path-prefix \$(pwd)=/workspace\" cargo build --locked --release --target x86_64-unknown-linux-musl
         
         # 3. Create Initramfs
         rm -rf rootfs zero_trust_os.cpio
