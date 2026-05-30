@@ -42,7 +42,7 @@ The cloud provider controls the physical hardware, the hypervisor, and the netwo
 | **Inject code via DMA** | Provider uses hardware DMA to write to VM memory | SEV-SNP enforces Reverse Map Table (RMP) checks. DMA from the host to guest-encrypted pages is blocked by hardware. | ✅ Mitigated |
 | **Replay old VM state** | Provider restores a previous VM snapshot to revert security patches | SEV-SNP includes a version counter in attestation reports. Replayed VMs have stale counters detectable by auditors. | ✅ Mitigated |
 | **Manipulate DHCP/DNS** | Provider returns malicious DNS entries to redirect traffic | DNS resolvers are **hardcoded** (Quad9 `9.9.9.9`, Cloudflare `1.1.1.1`). DHCP-provided DNS is explicitly ignored. The loader writes its own `/etc/resolv.conf` before any network request. | ✅ Mitigated |
-| **TLS man-in-the-middle** | Provider intercepts HTTPS using a rogue CA certificate | The loader uses an **embedded Mozilla CA root store** compiled into the binary. It never reads from `/etc/ssl/certs`. The provider cannot inject a rogue CA because the cert store is part of the measured binary. | ✅ Mitigated |
+| **TLS man-in-the-middle** | Provider intercepts HTTPS using a rogue CA certificate | The loader enforces **TLS 1.3 only** with **AES-256-GCM** and **X25519MLKEM768** (post-quantum hybrid key exchange). It uses an embedded Mozilla CA root store compiled into the binary. Protocol downgrade is impossible. Rogue CAs cannot be injected because the cert store is part of the measured binary. | ✅ Mitigated |
 | **Intercept serial console** | Provider reads VM console output for secrets | The loader only prints operational status messages. No secrets, keys, or sensitive data are ever printed to the console. | ✅ Mitigated |
 
 ### 2. Network Adversary
@@ -53,8 +53,8 @@ Any entity that can observe or manipulate traffic between the VM and the interne
 |:---|:---|:---|:---|
 | **DNS spoofing** | Redirect `github.com` to attacker-controlled server | Hardcoded DNS resolvers (Quad9 + Cloudflare) via trusted public infrastructure. DHCP DNS ignored. | ✅ Mitigated |
 | **TLS interception** | Present a fraudulent TLS certificate for github.com | Embedded Mozilla CA root store. Provider cannot add rogue CAs. Connection fails if cert doesn't chain to a real CA. | ✅ Mitigated |
-| **Binary substitution** | Replace the downloaded server binary in transit | Even if an attacker somehow broke TLS, the binary must carry a valid **Ed25519 signature** matching the hardcoded public key. An unsigned or wrongly-signed binary causes immediate VM halt. | ✅ Mitigated |
-| **Network blackholing** | Block all network traffic to prevent booting | The loader retries downloads with configurable backoff (5 attempts, 3s delay). Persistent network failure causes the VM to halt. This is a denial-of-service but not a confidentiality/integrity breach. | ⚠️ DoS only |
+| **Binary substitution** | Replace the downloaded server binary in transit | Even if an attacker somehow broke TLS, the binary must carry a valid **Ed25519 signature** matching the hardcoded public key. An unsigned or wrongly-signed binary causes **immediate VM shutdown** (power-off). | ✅ Mitigated |
+| **Network blackholing** | Block all network traffic to prevent booting | The loader retries downloads with configurable backoff (5 attempts, 3s delay). Persistent network failure triggers **immediate shutdown** (power-off). This is a denial-of-service but not a confidentiality/integrity breach. | ⚠️ DoS only |
 
 ### 3. Malicious Project Owner
 
@@ -73,7 +73,7 @@ A nation-state or advanced adversary that has compromised GitHub's infrastructur
 
 | Attack Vector | Description | Mitigation | Status |
 |:---|:---|:---|:---|
-| **Serve modified release binary** | GitHub serves a different binary than what was built | The binary must pass **Ed25519 signature verification**. The signing key is held exclusively by the owner, not by GitHub. GitHub cannot produce a valid signature. The VM halts on invalid signatures. | ✅ Mitigated |
+| **Serve modified release binary** | GitHub serves a different binary than what was built | The binary must pass **Ed25519 signature verification**. The signing key is held exclusively by the owner, not by GitHub. GitHub cannot produce a valid signature. The VM powers off on invalid signatures. | ✅ Mitigated |
 | **Modify source code on GitHub** | Alter the visible source code to hide a backdoor | Users verify via **reproducible builds**. They compile the source locally and compare the measurement against the live attestation. If GitHub modified the source, the locally-compiled measurement won't match the attestation, exposing the tampering. | ✅ Mitigated |
 | **Compromise the CA system** | Issue a fraudulent TLS certificate for github.com | Even if TLS is broken, the **Ed25519 signature verification** is a completely independent layer. A rogue TLS cert allows downloading a binary, but not faking the signature. | ✅ Mitigated |
 | **Backdoor the Rust compiler** | Supply-chain attack via compromised `rustc` | The Docker build environment uses a **pinned** Ubuntu base image (locked by SHA-256 digest), a specific Rust version (1.95.0), and specific GCC version (11.4.0). Users can verify the toolchain integrity independently. The build is deterministic — any toolchain modification produces different hashes. | ⚠️ Partially mitigated |

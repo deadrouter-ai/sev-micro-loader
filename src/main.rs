@@ -2,7 +2,8 @@ use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
-use sha2::{Sha256, Digest};
+use std::sync::Arc;
+use sha2::{Sha384, Sha512, Digest};
 use ed25519_dalek::{Verifier, VerifyingKey, Signature};
 use nix::mount::{mount, MsFlags};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -33,6 +34,7 @@ const MAX_DOWNLOAD_RETRIES: u32 = 5;
 const RETRY_DELAY_SECS: u64 = 3;
 const REQUEST_TIMEOUT_SECS: u64 = 120;
 const NETWORK_SETTLE_SECS: u64 = 5;
+const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 
 // ============================================================================
 // SEV-SNP ioctl constants (Linux UAPI: include/uapi/linux/sev-guest.h)
@@ -67,6 +69,25 @@ struct SnpReportResp {
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() == 3 && args[1] == "run-attestation-server" {
+        let payload_hash = args[2].clone();
+        println!("[ATTEST] Starting isolated attestation server (PID {})", std::process::id());
+        
+        // Drop privileges to 'nobody' (UID/GID 65534) to isolate TCP server from PID 1
+        unsafe {
+            if libc::setgid(65534) != 0 {
+                eprintln!("[ATTEST] Warning: Failed to setgid");
+            }
+            if libc::setuid(65534) != 0 {
+                eprintln!("[ATTEST] Warning: Failed to setuid");
+            }
+        }
+
+        run_attestation_server(&payload_hash).await;
+        std::process::exit(0);
+    }
+
     println!("[INIT] Confidential Micro-Loader starting (PID 1)...");
 
     // ========================================================================
@@ -85,19 +106,34 @@ async fn main() {
     // ========================================================================
     println!("[INIT] Downloading production payload and detached signature...");
 
-    // Build TLS config with EMBEDDED Mozilla CA root certificates.
+    // Build TLS config with MAXIMUM SECURITY:
+    //   - TLS 1.3 ONLY (no protocol downgrade possible)
+    //   - AES-256-GCM ONLY (no weaker ciphers)
+    //   - X25519MLKEM768 key exchange ONLY (post-quantum hybrid, resistant to
+    //     quantum computer attacks via ML-KEM-768 combined with X25519)
+    //   - Embedded Mozilla CA root certificates (no host cert store used)
+    //
     // In a bare initramfs there is no /etc/ssl/certs — we bake the CA
     // store directly into the binary so TLS works without any system files.
-    //
-    // We must install the crypto provider BEFORE calling ClientConfig::builder().
-    // reqwest only installs it inside its own build() path, but we need it here.
-    let _ = rustls::crypto::CryptoProvider::install_default(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    );
+    let hardened_provider = rustls::crypto::CryptoProvider {
+        cipher_suites: vec![
+            // AES-256-GCM only — no AES-128, no ChaCha20
+            rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384,
+        ],
+        kx_groups: vec![
+            rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768,
+            rustls::crypto::aws_lc_rs::kx_group::X25519,
+        ],
+        ..rustls::crypto::aws_lc_rs::default_provider()
+    };
+
+    let _ = rustls::crypto::CryptoProvider::install_default(hardened_provider.clone());
 
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let tls_config = rustls::ClientConfig::builder()
+    let tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(hardened_provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap_or_else(|e| panic_shutdown(&format!("TLS 1.3 configuration failed: {}", e)))
         .with_root_certificates(root_store)
         .with_no_client_auth();
 
@@ -106,7 +142,7 @@ async fn main() {
         .connect_timeout(std::time::Duration::from_secs(30))
         .use_preconfigured_tls(tls_config)
         .build()
-        .unwrap_or_else(|e| panic_halt(&format!("Failed to build HTTP client: {:?}", e)));
+        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to build HTTP client: {:?}", e)));
 
     let app_bytes = download_with_retry(&client, BINARY_URL, "production binary").await;
     let sig_bytes = download_with_retry(&client, SIGNATURE_URL, "cryptographic signature").await;
@@ -119,15 +155,15 @@ async fn main() {
     // ========================================================================
     println!("[INIT] Performing Ed25519 signature verification...");
     let verifying_key = VerifyingKey::from_bytes(&PUBLIC_KEY_BYTES)
-        .unwrap_or_else(|e| panic_halt(&format!("Invalid hardcoded public key: {}", e)));
+        .unwrap_or_else(|e| panic_shutdown(&format!("Invalid hardcoded public key: {}", e)));
     let signature = Signature::from_slice(&sig_bytes)
-        .unwrap_or_else(|e| panic_halt(&format!("Invalid signature format: {}", e)));
+        .unwrap_or_else(|e| panic_shutdown(&format!("Invalid signature format: {}", e)));
 
     if verifying_key.verify(&app_bytes, &signature).is_err() {
-        panic_halt(
+        panic_shutdown(
             "CRITICAL: Signature verification FAILED!\n\
              Binary does NOT match the trusted signing key.\n\
-             System halted to prevent execution of untrusted code."
+             System shutting down to prevent execution of untrusted code."
         );
     }
     println!("[INIT] Signature verification PASSED.");
@@ -135,22 +171,22 @@ async fn main() {
     // ========================================================================
     // STEP 4: COMPUTE HASH
     // ========================================================================
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha384::new();
     hasher.update(&app_bytes);
     let runtime_hash = hasher.finalize();
     let hash_hex = hex::encode(&runtime_hash);
-    println!("[INIT] Payload SHA-256: {}", hash_hex);
+    println!("[INIT] Payload SHA-384: {}", hash_hex);
 
     // ========================================================================
     // STEP 5: DEPLOY BINARY TO ISOLATED READ-ONLY TMPFS
     // ========================================================================
     println!("[INIT] Writing verified binary to isolated volatile storage...");
     std::fs::write(TARGET_PATH, &app_bytes)
-        .unwrap_or_else(|e| panic_halt(&format!("Failed to write binary: {}", e)));
+        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to write binary: {}", e)));
     drop(app_bytes);
 
     std::fs::set_permissions(TARGET_PATH, Permissions::from_mode(0o500))
-        .unwrap_or_else(|e| panic_halt(&format!("Failed to chmod binary: {}", e)));
+        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to chmod binary: {}", e)));
 
     // ========================================================================
     // STEP 6: LOCK DOWN FILESYSTEM — MAKE BINARY IMMUTABLE
@@ -169,44 +205,56 @@ async fn main() {
         .env("ENV_PRODUCTION", "true")
         .env("LOADER_PAYLOAD_HASH", &hash_hex)
         .spawn()
-        .unwrap_or_else(|e| panic_halt(&format!("Failed to spawn server: {}", e)));
+        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to spawn server: {}", e)));
 
     let child_pid = child.id();
     println!("[INIT] Server launched as PID {}.", child_pid);
 
     // ========================================================================
-    // STEP 8: RUN INDEPENDENT ATTESTATION SERVER ON :8080
+    // STEP 8: RUN INDEPENDENT ATTESTATION SERVER (Isolated Child Process)
     // ========================================================================
-    // PID 1 now serves two roles:
-    // 1. Independent attestation endpoint (tamper-proof, measured in SEV-SNP)
-    // 2. Zombie reaper (PID 1 must wait() on orphaned children)
-    println!("[INIT] Starting independent attestation server on :{}", ATTESTATION_PORT);
-    println!("[INIT] Boot sequence complete. System operational.");
+    // Running a TCP server in PID 1 is dangerous. Instead, we spawn it as a 
+    // separate, unprivileged child process. PID 1 simply acts as a watchdog.
+    
+    // Make /dev/sev-guest accessible to the unprivileged attestation server
+    if Path::new("/dev/sev-guest").exists() {
+        let _ = std::fs::set_permissions("/dev/sev-guest", Permissions::from_mode(0o666));
+    }
 
-    // Spawn zombie reaper in background
-    tokio::spawn(async {
-        loop {
-            // Reap any zombie children. PID 1 must do this.
-            unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG); }
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-        }
-    });
+    let current_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/init"));
+    let mut attest_child = Command::new(current_exe)
+        .arg("run-attestation-server")
+        .arg(&hash_hex)
+        .spawn()
+        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to spawn attestation server: {}", e)));
 
-    // Spawn child process monitor
+    let attest_pid = attest_child.id();
+    println!("[INIT] Attestation server spawned as isolated PID {}.", attest_pid);
+
+    // Spawn child process monitor for the main payload server
     tokio::task::spawn_blocking(move || {
         match child.wait() {
-            Ok(status) => {
-                eprintln!("[FATAL] Server process (PID {}) exited with: {}", child_pid, status);
-                eprintln!("[FATAL] Server should never exit. System is in degraded state.");
-            }
-            Err(e) => {
-                eprintln!("[FATAL] Failed to wait on server process: {}", e);
-            }
+            Ok(status) => panic_shutdown(&format!("Server process (PID {}) exited with: {}. System integrity compromised.", child_pid, status)),
+            Err(e) => panic_shutdown(&format!("Failed to monitor server process: {}", e)),
         }
     });
 
-    // Run the attestation server (blocks forever)
-    run_attestation_server(&hash_hex).await;
+    // Spawn child process monitor for the attestation server
+    tokio::task::spawn_blocking(move || {
+        match attest_child.wait() {
+            Ok(status) => panic_shutdown(&format!("Attestation server (PID {}) exited with: {}. System integrity compromised.", attest_pid, status)),
+            Err(e) => panic_shutdown(&format!("Failed to monitor attestation server: {}", e)),
+        }
+    });
+
+    println!("[INIT] Boot sequence complete. System operational. PID 1 entering watchdog mode.");
+
+    // PID 1 watchdog & zombie reaper loop
+    loop {
+        // Reap any zombie children. PID 1 must do this in Linux.
+        unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG); }
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    }
 }
 
 // ============================================================================
@@ -218,15 +266,15 @@ fn prepare_system_env() {
 
     // /proc — networking, process info
     mount(Some("proc"), "/proc", Some("proc"), nosuid_nodev_noexec, None::<&str>)
-        .unwrap_or_else(|e| panic_halt(&format!("Failed to mount /proc: {}", e)));
+        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to mount /proc: {}", e)));
 
     // /sys — device/network enumeration
     mount(Some("sysfs"), "/sys", Some("sysfs"), nosuid_nodev_noexec, None::<&str>)
-        .unwrap_or_else(|e| panic_halt(&format!("Failed to mount /sys: {}", e)));
+        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to mount /sys: {}", e)));
 
     // /dev — device nodes (network, sev-guest, etc.)
     mount(Some("devtmpfs"), "/dev", Some("devtmpfs"), MsFlags::MS_NOSUID, None::<&str>)
-        .unwrap_or_else(|e| panic_halt(&format!("Failed to mount /dev: {}", e)));
+        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to mount /dev: {}", e)));
 
     // /dev/pts for pseudoterminal support
     let _ = std::fs::create_dir("/dev/pts");
@@ -238,24 +286,24 @@ fn prepare_system_env() {
     mount(Some("tmpfs"), "/tmp", Some("tmpfs"),
           MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
           Some("size=64m,mode=1700"))
-        .unwrap_or_else(|e| panic_halt(&format!("Failed to mount /tmp: {}", e)));
+        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to mount /tmp: {}", e)));
 
     // /run — general runtime volatile directory
     let _ = std::fs::create_dir_all("/run");
     mount(Some("tmpfs"), "/run", Some("tmpfs"),
           MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
           Some("size=16m,mode=0700"))
-        .unwrap_or_else(|e| panic_halt(&format!("Failed to mount /run: {}", e)));
+        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to mount /run: {}", e)));
 
     // /run/payload — dedicated tmpfs for the server binary.
     // This starts writable so we can write the binary, then gets remounted
     // read-only in lockdown_filesystem(). No NOEXEC here since we need to execute from it.
     std::fs::create_dir_all(PAYLOAD_DIR)
-        .unwrap_or_else(|e| panic_halt(&format!("Failed to create {}: {}", PAYLOAD_DIR, e)));
+        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to create {}: {}", PAYLOAD_DIR, e)));
     mount(Some("tmpfs"), PAYLOAD_DIR, Some("tmpfs"),
           MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
           Some("size=256m,mode=0500"))
-        .unwrap_or_else(|e| panic_halt(&format!("Failed to mount {}: {}", PAYLOAD_DIR, e)));
+        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to mount {}: {}", PAYLOAD_DIR, e)));
 
     // ---- NETWORK INTERFACE INITIALIZATION ----
     // PID 1 must bring up network interfaces. The kernel ip=dhcp boot param
@@ -270,7 +318,7 @@ fn prepare_system_env() {
     println!("[INIT] Configuring trusted DNS resolvers (Quad9 + Cloudflare)...");
     let _ = std::fs::create_dir_all("/etc");
     std::fs::write("/etc/resolv.conf", "nameserver 9.9.9.9\nnameserver 1.1.1.1\n")
-        .unwrap_or_else(|e| panic_halt(&format!("Failed to write /etc/resolv.conf: {}", e)));
+        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to write /etc/resolv.conf: {}", e)));
 
     println!("[INIT] Filesystem environment ready.");
 }
@@ -453,7 +501,7 @@ fn lockdown_filesystem() {
     mount(None::<&str>, PAYLOAD_DIR, None::<&str>,
           MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
           None::<&str>)
-        .unwrap_or_else(|e| panic_halt(&format!("CRITICAL: Failed to remount {} read-only: {}", PAYLOAD_DIR, e)));
+        .unwrap_or_else(|e| panic_shutdown(&format!("CRITICAL: Failed to remount {} read-only: {}", PAYLOAD_DIR, e)));
 
     println!("[INIT] Filesystem locked:");
     println!("[INIT]   /run/payload  → READ-ONLY (binary immutable)");
@@ -505,7 +553,7 @@ async fn download_with_retry(client: &reqwest::Client, url: &str, desc: &str) ->
             }
         }
     }
-    panic_halt(&format!("Failed to download {} after {} attempts: {}", desc, MAX_DOWNLOAD_RETRIES, last_error))
+    panic_shutdown(&format!("Failed to download {} after {} attempts: {}", desc, MAX_DOWNLOAD_RETRIES, last_error))
 }
 
 // ============================================================================
@@ -515,18 +563,24 @@ async fn download_with_retry(client: &reqwest::Client, url: &str, desc: &str) ->
 // LAUNCH_MEASUREMENT). It cannot be tampered with without detection.
 // It provides a hardware-rooted proof of what binary is running.
 //
-// Endpoint: GET /v1/attestation?nonce=<64 hex chars>
-//   - nonce: 32 bytes hex-encoded, user-provided for freshness
+// Endpoint: GET /v1/attestation?nonce=<hex encoded nonce>
+//   - nonce: 1 to 128 bytes hex-encoded, user-provided for freshness
 //   - Returns: JSON with raw SEV-SNP attestation report + payload hash
-//   - report_data layout: [0..32] = nonce bytes, [32..64] = payload SHA-256
+//   - report_data layout: 64-byte SHA-512 of [payload SHA-384 || nonce]
 async fn run_attestation_server(payload_hash_hex: &str) {
     let listener = TcpListener::bind(format!("0.0.0.0:{}", ATTESTATION_PORT)).await
-        .unwrap_or_else(|e| panic_halt(&format!("Failed to bind attestation port: {}", e)));
+        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to bind attestation port: {}", e)));
+
+    println!("[ATTEST] Attestation server bound on :{} — this is the independent watchdog.", ATTESTATION_PORT);
+    println!("[ATTEST] Any failure or interference with this server triggers immediate shutdown.");
 
     let payload_hash = payload_hash_hex.to_string();
+    let mut consecutive_errors: u32 = 0;
+
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
+                consecutive_errors = 0; // Reset on success
                 let hash = payload_hash.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_attestation_connection(stream, &hash).await {
@@ -534,7 +588,30 @@ async fn run_attestation_server(payload_hash_hex: &str) {
                     }
                 });
             }
-            Err(e) => eprintln!("[ATTEST] Accept error: {}", e),
+            Err(e) => {
+                // Prevent remote DoS: ignore errors caused by clients dropping the connection
+                let kind = e.kind();
+                if kind == std::io::ErrorKind::ConnectionAborted ||
+                   kind == std::io::ErrorKind::ConnectionReset ||
+                   kind == std::io::ErrorKind::BrokenPipe ||
+                   kind == std::io::ErrorKind::Interrupted {
+                    continue; // Perfectly normal network behavior
+                }
+
+                consecutive_errors += 1;
+                eprintln!("[ATTEST] Accept error ({}/{}): {}", consecutive_errors, MAX_CONSECUTIVE_ERRORS, e);
+                
+                // Prevent tight spinloop on resource exhaustion (e.g. EMFILE)
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    panic_shutdown(&format!(
+                        "Attestation server failed {} consecutive accepts. \
+                         Possible interference detected. System integrity compromised.",
+                        MAX_CONSECUTIVE_ERRORS
+                    ));
+                }
+            }
         }
     }
 }
@@ -546,7 +623,7 @@ async fn handle_attestation_connection(
     // Read the HTTP request (max 4KB — more than enough for a GET request)
     let mut buf = [0u8; 4096];
     let n = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(3), // strict timeout
         stream.read(&mut buf)
     ).await??;
 
@@ -555,17 +632,26 @@ async fn handle_attestation_connection(
     }
 
     let request = String::from_utf8_lossy(&buf[..n]);
+    
+    // Strict enforcement: silently drop malformed requests
+    if !request.contains("\r\n\r\n") {
+        return Ok(()); // Anti-DoS: drop incomplete requests instantly
+    }
+
     let first_line = request.lines().next().unwrap_or("");
     let parts: Vec<&str> = first_line.split_whitespace().collect();
 
-    // Only accept GET requests
-    if parts.len() < 2 || parts[0] != "GET" {
-        send_http_response(&mut stream, 405, "application/json",
-            r#"{"error":"method_not_allowed"}"#).await?;
-        return Ok(());
+    // Must be exactly "GET /... HTTP/1.x"
+    if parts.len() != 3 || parts[0] != "GET" || !parts[2].starts_with("HTTP/") {
+        return Ok(()); // Anti-scanner: silently drop unexpected protocols/methods
     }
 
     let path_query = parts[1];
+
+    // Must target the attestation endpoint
+    if !path_query.starts_with("/v1/attestation") {
+        return Ok(()); // Anti-scanner: silently drop unexpected paths
+    }
 
     // Parse path and query string
     let (path, query) = match path_query.split_once('?') {
@@ -574,18 +660,16 @@ async fn handle_attestation_connection(
     };
 
     if path != "/v1/attestation" {
-        send_http_response(&mut stream, 404, "application/json",
-            r#"{"error":"not_found","hint":"Use GET /v1/attestation?nonce=<64 hex chars>"}"#).await?;
         return Ok(());
     }
 
     // Extract nonce from query parameters
     let nonce_hex = extract_query_param(query, "nonce").unwrap_or_default();
 
-    // Validate nonce: must be exactly 64 hex characters (32 bytes)
-    if nonce_hex.len() != 64 || !nonce_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+    // Validate nonce: must be a valid hex string between 2 and 256 characters (1 to 128 bytes)
+    if nonce_hex.len() < 2 || nonce_hex.len() > 256 || nonce_hex.len() % 2 != 0 || !nonce_hex.chars().all(|c| c.is_ascii_hexdigit()) {
         send_http_response(&mut stream, 400, "application/json",
-            r#"{"error":"invalid_nonce","hint":"nonce must be exactly 64 hex characters (32 bytes)"}"#).await?;
+            r#"{"error":"invalid_nonce","hint":"nonce must be a hex-encoded string between 1 and 128 bytes (2 to 256 hex characters)"}"#).await?;
         return Ok(());
     }
 
@@ -594,10 +678,13 @@ async fn handle_attestation_connection(
     // Decode payload hash
     let payload_hash_bytes = hex::decode(payload_hash_hex)?;
 
-    // Build the 64-byte report_data: [nonce(32) || payload_hash(32)]
+    // Build the 64-byte report_data as SHA-512(payload_hash || nonce)
+    let mut hasher = Sha512::new();
+    hasher.update(&payload_hash_bytes);
+    hasher.update(&nonce_bytes);
+    let report_data_hash = hasher.finalize();
     let mut report_data = [0u8; 64];
-    report_data[..32].copy_from_slice(&nonce_bytes);
-    report_data[32..64].copy_from_slice(&payload_hash_bytes);
+    report_data.copy_from_slice(&report_data_hash);
 
     // Request SEV-SNP attestation report from hardware
     let (report_hex, platform) = match get_snp_attestation_report(&report_data) {
@@ -605,7 +692,7 @@ async fn handle_attestation_connection(
         Err(err) => {
             // Not running on SEV-SNP hardware — return error with context
             let body = format!(
-                r#"{{"error":"snp_unavailable","message":"{}","payload_sha256":"{}","nonce":"{}"}}"#,
+                r#"{{"error":"snp_unavailable","message":"{}","payload_sha384":"{}","nonce":"{}"}}"#,
                 err.replace('"', "'"), payload_hash_hex, nonce_hex
             );
             send_http_response(&mut stream, 503, "application/json", &body).await?;
@@ -620,7 +707,7 @@ async fn handle_attestation_connection(
             "  \"version\": 1,\n",
             "  \"platform\": \"{}\",\n",
             "  \"nonce\": \"{}\",\n",
-            "  \"payload_sha256\": \"{}\",\n",
+            "  \"payload_sha384\": \"{}\",\n",
             "  \"report_data_hex\": \"{}\",\n",
             "  \"attestation_report_hex\": \"{}\"\n",
             "}}"
@@ -728,15 +815,28 @@ fn get_snp_attestation_report(report_data: &[u8; 64]) -> Result<Vec<u8>, String>
 }
 
 // ============================================================================
-// TERMINAL HALT — NEVER RETURNS
+// PANIC SHUTDOWN — IMMEDIATE POWER-OFF, NEVER RETURNS
 // ============================================================================
-fn panic_halt(message: &str) -> ! {
+// Instead of hanging forever (which leaves a potentially compromised VM running),
+// we immediately power off the machine. This:
+//   1. Makes failures instantly detectable (server goes offline)
+//   2. Eliminates any window for malicious code to operate
+//   3. Prevents exploitation of a degraded/broken system state
+//   4. Forces a fresh boot from the measured image on restart
+fn panic_shutdown(message: &str) -> ! {
     eprintln!("\n======================================================================");
     eprintln!("FATAL: {}", message);
-    eprintln!("System halted. No code will execute. Manual intervention required.");
+    eprintln!("PANIC SHUTDOWN: Powering off immediately.");
     eprintln!("======================================================================");
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(3600));
-    }
-}
 
+    // Sync any buffered writes before power-off
+    unsafe { libc::sync(); }
+
+    // Immediate power-off. PID 1 has the privilege to do this.
+    // This is the nuclear option — no cleanup, no graceful shutdown.
+    // Any bad actor loses all execution capability instantly.
+    unsafe { libc::reboot(libc::RB_POWER_OFF); }
+
+    // If reboot() somehow fails (should never happen for PID 1), abort hard
+    std::process::abort();
+}

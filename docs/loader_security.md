@@ -23,7 +23,7 @@ flowchart LR
     subgraph VERIFY["Verification Chain"]
         TLS["TLS validates GitHub identity"]
         SIGCHECK["Ed25519 validates binary authenticity"]
-        HASH["SHA-256 hash recorded for attestation"]
+        HASH["SHA-384 hash recorded for attestation"]
     end
     URL -->|HTTPS| BIN
     URL -->|HTTPS| SIG
@@ -32,7 +32,7 @@ flowchart LR
     KEY --> SIGCHECK
     SIG --> SIGCHECK
     SIGCHECK -->|Pass| HASH
-    SIGCHECK -->|Fail| HALT["VM HALTS PERMANENTLY"]
+    SIGCHECK -->|Fail| HALT["PANIC SHUTDOWN"]
 ```
 
 ---
@@ -67,7 +67,7 @@ These URLs are part of the **measured binary**. Changing them would:
 
 3. **The attack cannot be targeted.** A backdoored release would be served to **all users equally**. The owner cannot serve different binaries to different users because GitHub Releases are a public CDN. This makes targeted attacks impossible and mass attacks immediately visible.
 
-4. **Users can compile and compare.** Anyone suspicious can compile the server from source, compute its SHA-256 hash, and compare it against the hash reported by the attestation endpoint. If they differ, the backdoor is exposed.
+4. **Users can compile and compare.** Anyone suspicious can compile the server from source, compute its SHA-384 hash, and compare it against the hash reported by the attestation endpoint. If they differ, the backdoor is exposed.
 
 5. **The signing key provides accountability.** Only the owner can sign a release. A backdoored release is cryptographically traceable to the owner's signing key. This is a strong deterrent.
 
@@ -76,6 +76,19 @@ These URLs are part of the **measured binary**. Changing them would:
 - Built by a public CI pipeline (reproducible)
 - Served to everyone equally (not targetable)
 - Cryptographically traceable to the owner (accountable)
+
+**But there's an even stronger defense:** Even in the absolute worst case — the owner signs a backdoored binary and somehow tricks every auditor — the **independent attestation server on port 8080** exposes the SHA-384 hash of the running application in every attestation response. Any user can:
+1. Query `GET /v1/attestation?nonce=<random>` at any time (nonce must be between 1 and 128 bytes, hex-encoded)
+2. Read the `payload_sha384` field from the response
+3. Compare it against the SHA-384 of the published binary on GitHub (or compile it themselves)
+4. Verify the hardware-signed `report_data` by computing `SHA-512(payload_sha384_bytes || nonce_bytes)` and ensuring it matches the `report_data_hex` and the `report_data` field within the signed attestation report
+5. If the hashes or verification checks fail → system integrity is compromised / backdoor detected
+
+This makes the downloaded server **exactly as verifiable** as the loader itself from a cryptographic perspective. The attestation endpoint cannot be tampered with because:
+- It is part of the **measured loader** (PID 1), not the downloaded server
+- Changing it changes the SEV-SNP measurement
+- The server process cannot modify PID 1 (it's a child process with no privilege over its parent)
+- If the server process tries to interfere with port 8080 (e.g., crash the loader), the **entire VM immediately shuts down** — PID 1 death = kernel panic
 
 ---
 
@@ -93,7 +106,7 @@ These URLs are part of the **measured binary**. Changing them would:
    ];
    ```
 
-3. **On signature failure, the VM halts permanently.** There is no fallback, no retry with different code, no degraded mode. The system enters an infinite sleep loop. No code ever executes.
+3. **On signature failure, the VM shuts down instantly.** There is no fallback, no retry with different code, no degraded mode. The system calls `reboot(RB_POWER_OFF)` to immediately cut all power. No code ever executes.
 
 **Verdict: ✅ Not a vulnerability.** GitHub cannot forge the owner's signature.
 
@@ -108,7 +121,7 @@ Attack scenario: A state actor compels a Certificate Authority to issue a fraudu
 Defense: The Ed25519 signature is a **completely independent verification layer** that does not depend on TLS or the CA system. Even if the TLS layer is fully compromised:
 - The attacker can serve a different binary ✅
 - The attacker **cannot** produce a valid Ed25519 signature ❌
-- The VM halts on the invalid signature ✅
+- The VM shuts down on the invalid signature ✅
 
 **Verdict: ✅ Defense in depth works.** TLS is the first layer; Ed25519 is the second, independent layer.
 
@@ -149,41 +162,73 @@ With the current architecture:
 
 ---
 
+### Question 7: What if a malicious binary somehow gets through all defenses?
+
+Even in the theoretical worst case where every defense layer fails and a malicious binary runs inside the VM, the damage is severely contained:
+
+1. **No lateral movement.** The malicious binary runs on a READ-ONLY mount. All writable directories are NOEXEC. There is no shell, no compiler, no package manager, no SSH. The attacker cannot drop tools, cannot compile exploits, cannot open a reverse shell.
+
+2. **Automatic detection via attestation.** The independent attestation server on port 8080 exposes the `payload_sha384` of the running binary in every response. Any user querying attestation will see a hash that doesn't match the published binary. The backdoor is caught red-handed on the very next attestation query.
+
+3. **Cannot tamper with detection.** The attestation server is PID 1 — the most privileged process. The malicious server is a child process. It cannot:
+   - Kill PID 1 (killing PID 1 causes a kernel panic → VM dies)
+   - Bind to port 8080 (already bound by PID 1)
+   - Modify PID 1's memory (separate process, no `ptrace` without `CAP_SYS_PTRACE` and no tools to do it)
+   - Modify the attestation responses (they come from AMD hardware, not from software)
+
+4. **Any interference = immediate shutdown.** The system is designed so that any anomaly triggers an immediate power-off:
+   - Server process dies → VM shuts down
+   - Attestation server fails → VM shuts down
+   - Any critical operation fails → VM shuts down
+   
+   A malicious binary cannot operate silently. Any attempt to interfere with the system kills the entire VM, making the compromise immediately visible to monitoring.
+
+5. **No persistence.** Everything is RAM-only. There is no disk. A reboot starts fresh from the measured boot image. The attacker gains nothing lasting.
+
+---
+
 ## Summary of Defense Layers
 
 ```mermaid
 flowchart TB
     DOWNLOAD["Binary Downloaded<br/>from GitHub"]
-    TLS{"TLS Verification<br/>(Embedded Mozilla CAs)"}
-    SIG{"Ed25519 Signature<br/>(Hardcoded Public Key)"}
+    TLS{"TLS 1.3 + PQ Crypto<br/>AES-256 + MLKEM768X25519"}
+    SIG{"Ed25519 Signature<br/>Hardcoded Public Key"}
     WRITE["Write to /run/payload"]
     LOCK["Remount READ-ONLY"]
     NOEXEC["All writable mounts: NOEXEC"]
     RUN["Execute verified binary"]
+    WATCH["Attestation Watchdog on port 8080<br/>Exposes payload SHA-384 continuously"]
 
     DOWNLOAD --> TLS
     TLS -->|"Valid cert"| SIG
     TLS -->|"Invalid cert"| HALT1["Connection fails"]
     SIG -->|"Valid signature"| WRITE
-    SIG -->|"Invalid signature"| HALT2["VM HALTS PERMANENTLY"]
+    SIG -->|"Invalid signature"| HALT2["PANIC SHUTDOWN"]
     WRITE --> LOCK --> NOEXEC --> RUN
+    RUN --> WATCH
+    WATCH -->|"Server dies or watchdog fails"| HALT3["PANIC SHUTDOWN"]
 
     style HALT1 fill:#e94560,color:#fff
     style HALT2 fill:#e94560,color:#fff
+    style HALT3 fill:#e94560,color:#fff
     style TLS fill:#16213e,stroke:#0f3460,color:#eee
     style SIG fill:#16213e,stroke:#0f3460,color:#eee
     style LOCK fill:#0f3460,stroke:#e94560,color:#eee
     style NOEXEC fill:#0f3460,stroke:#e94560,color:#eee
+    style WATCH fill:#533483,stroke:#e94560,color:#eee
 ```
 
 | Layer | What It Stops | Independent? |
 |:---|:---|:---|
-| **TLS with embedded CAs** | Network interception, DNS hijacking | Yes |
+| **TLS 1.3 + Post-Quantum KX** | Network interception, quantum attacks, protocol downgrade | Yes |
 | **Ed25519 signature** | Tampered binaries, compromised GitHub, rogue CAs | Yes |
 | **Hardcoded URLs** | Redirection to malicious servers | Yes |
 | **Public source code** | Hidden backdoors by the owner | Yes |
 | **Reproducible builds** | Discrepancies between source and binary | Yes |
-| **Filesystem lockdown** | Post-exploitation persistence | Yes |
+| **Filesystem lockdown** | Post-exploitation persistence and lateral movement | Yes |
+| **Attestation watchdog** | Silent compromise — exposes payload hash for continuous verification | Yes |
+| **Panic shutdown** | Lingering in a degraded/compromised state — any anomaly kills the VM | Yes |
 | **AMD SEV-SNP measurement** | Boot image tampering by the cloud provider | Yes |
 
 Each layer is **independently sufficient** to stop its targeted attack class. An attacker must defeat **all layers simultaneously** to compromise the system.

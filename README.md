@@ -104,10 +104,11 @@ The VM does **not** contain the actual server software directly. Instead, it con
 | **Cloud provider spies on VM** | Provider | AMD SEV-SNP encrypts all VM memory with a hardware key the provider cannot access |
 | **Provider modifies boot code** | Provider | AMD Secure Processor measures kernel+initramfs. Any change alters the measurement |
 | **DNS hijacking** | Provider/Network | DNS resolvers hardcoded (Quad9 + Cloudflare). DHCP DNS ignored |
-| **TLS interception** | Provider/State | Mozilla CA store embedded in binary. No host cert store used |
+| **TLS interception** | Provider/State | TLS 1.3 only, AES-256-GCM only, post-quantum X25519MLKEM768 key exchange. Embedded CA store |
 | **GitHub serves malicious binary** | GitHub/State | Downloaded binary requires valid Ed25519 signature. Only owner holds private key |
-| **Owner pushes backdoor** | Owner | Server source is public. Build pipeline is public GitHub Actions. Anyone can audit |
+| **Owner pushes backdoor** | Owner | Server source is public. Attestation server exposes payload SHA-384 for independent verification |
 | **Server exploit** | Attacker | Binary on READ-ONLY mount. Writable dirs are NOEXEC. No shell or SSH exists |
+| **Malicious code interferes** | Any | Any anomaly (server death, attestation failure) triggers **immediate VM power-off** |
 | **Kernel module injection** | Any | Kernel compiled with `CONFIG_MODULES=n`. Modules disabled at compile time |
 | **Physical RAM access** | Datacenter | SEV-SNP hardware encryption. Physical access yields only ciphertext |
 
@@ -156,7 +157,7 @@ docker run hello-world
 ```bash
 git clone https://github.com/deadrouter-ai/sev-micro-loader.git
 cd sev-micro-loader
-git checkout v0.0.5-alpha  # Replace with the release tag you want to verify
+git checkout v1.0.0 # Replace with the release tag you want to verify
 ./build_reproducible.sh
 ```
 
@@ -206,7 +207,7 @@ wget -q https://download.rockylinux.org/pub/rocky/10.1/devel/x86_64/os/Packages/
 rpm2cpio edk2-ovmf-20250523-2.el10.noarch.rpm | cpio -idmv
 
 # Verify OVMF hash
-echo "950daf793754f7a8bd85b716d2ebf77b96d49724671a2ab12cf3a9607f1aa8fe  usr/share/edk2/ovmf/OVMF.amdsev.fd" | sha256sum -c
+echo "8082ac81116050b9d2757e99985c23672ba88d397632f6cb1487a553cf31ef5736edad37177926bbe8e9c8153c5295c0  usr/share/edk2/ovmf/OVMF.amdsev.fd" | sha384sum -c
 
 # Compute measurement
 python3 sev-snp-measure/sev-snp-measure.py \
@@ -235,10 +236,11 @@ qemu-system-x86_64 \
 
 Test attestation (from another terminal):
 ```bash
-curl -s "http://localhost:8080/v1/attestation?nonce=$(openssl rand -hex 32)" | python3 -m json.tool
+curl -s "http://localhost:8080/v1/attestation?nonce=$(openssl rand -hex 64)" | python3 -m json.tool
 ```
 
 > On non-SEV hardware, the response will be `snp_unavailable`. This is normal for local testing.
+> The attestation endpoint accepts any user-defined nonce from 1 to 128 bytes in hex format (2 to 256 characters).
 
 ---
 

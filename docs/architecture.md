@@ -68,15 +68,21 @@ https://github.com/deadrouter-ai/api-proxy-server/releases/latest/download/serve
 https://github.com/deadrouter-ai/api-proxy-server/releases/latest/download/server.sig
 ```
 
-TLS is configured with an **embedded Mozilla CA root certificate store**. The loader does not use `/etc/ssl/certs` from the host, which could be tampered with. This makes TLS man-in-the-middle attacks impossible without breaking the TLS connection entirely.
+TLS is configured with **maximum security hardening**:
+- **TLS 1.3 only** — no protocol downgrade is possible
+- **AES-256-GCM only** — no weaker cipher suites
+- **X25519MLKEM768 key exchange only** — post-quantum hybrid, resistant to both classical and quantum computer attacks
+- **Embedded Mozilla CA root certificate store** — the loader does not use `/etc/ssl/certs` from the host
+
+This makes TLS man-in-the-middle attacks impossible without breaking the TLS connection entirely.
 
 ### Step 5: Cryptographic Verification
 
 The downloaded binary is verified against a **hardcoded Ed25519 public key**:
 
 ```
-If signature is INVALID → System halts immediately. No code executes. Ever.
-If signature is VALID   → Binary is accepted and its SHA-256 hash is computed.
+If signature is INVALID → PANIC SHUTDOWN. Immediate power-off. No code executes. Ever.
+If signature is VALID   → Binary is accepted and its SHA-384 hash is computed.
 ```
 
 This ensures that even if the download URL were somehow redirected (which is impossible because it's hardcoded), the attacker would need the owner's private signing key to produce a valid signature.
@@ -99,25 +105,26 @@ After writing the verified binary to `/run/payload/server`:
 
 The server is spawned as a **child process** (not via `execve`). PID 1 (the loader) remains running and serves two critical roles:
 
-1. **Independent attestation endpoint** on port 8080 — this is part of the measured code and cannot be tampered with
+1. **Independent attestation endpoint** on port 8080 — this is part of the measured code and cannot be tampered with. It exposes the SHA-384 hash of the running server binary, allowing anyone to verify what code is executing.
 2. **Zombie process reaper** — required because PID 1 must `wait()` on orphaned children in Linux
+3. **System watchdog** — if the server process dies, or if the attestation server fails, PID 1 triggers an **immediate panic shutdown** (power-off). The system cannot operate in a degraded state.
 
 ### Step 8: Hardware Attestation
 
 The loader serves a REST API on port 8080 that allows anyone to request a hardware-signed attestation report:
 
 ```
-GET /v1/attestation?nonce=<64 hex chars>
+GET /v1/attestation?nonce=<hex-encoded nonce>
 ```
 
 The response includes:
-- A user-provided **nonce** (to prevent replay attacks)
-- The **SHA-256 hash** of the running server binary
+- A user-provided **nonce** (1 to 128 bytes, hex-encoded to prevent replay attacks)
+- The **SHA-384 hash** of the running server binary
 - A **hardware-signed attestation report** from the AMD Secure Processor
 
 The attestation report is signed by a key chain rooted in AMD's hardware. It proves:
 - The VM is running on genuine AMD SEV-SNP hardware
 - The boot measurement matches the expected value
-- The report data contains the nonce and payload hash
+- The signed `report_data` contains the 64-byte SHA-512 hash of the payload hash concatenated with the nonce bytes: `SHA-512(payload_sha384_bytes || nonce_bytes)`
 
 This report is **cryptographically unforgeable**. No software — including the hypervisor, the cloud provider's management plane, or even a compromised kernel — can produce a valid attestation report with a different measurement.

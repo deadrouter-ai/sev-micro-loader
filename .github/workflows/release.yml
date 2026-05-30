@@ -37,14 +37,14 @@ jobs:
       - name: Generate Hashes for Release Notes
         id: hashes
         run: |
-          # 1. zero_trust_os.cpio SHA-256
-          CPIO_HASH=$(sha256sum zero_trust_os.cpio | awk '{print $1}')
+          # 1. zero_trust_os.cpio SHA-384
+          CPIO_HASH=$(sha384sum zero_trust_os.cpio | awk '{print $1}')
           
-          # 2. bzImage SHA-256 (Kernel build folder contains absolute paths in .cmd files)
-          KERNEL_BZIMAGE_HASH=$(sha256sum linux-6.12.91/arch/x86/boot/bzImage | awk '{print $1}')
+          # 2. bzImage SHA-384 (Kernel build folder contains absolute paths in .cmd files)
+          KERNEL_BZIMAGE_HASH=$(sha384sum linux-6.12.91/arch/x86/boot/bzImage | awk '{print $1}')
           
           # 3. Static OVMF Hash
-          OVMF_HASH=$(sha256sum usr/share/edk2/ovmf/OVMF.amdsev.fd | awk '{print $1}')
+          OVMF_HASH=$(sha384sum usr/share/edk2/ovmf/OVMF.amdsev.fd | awk '{print $1}')
           
           # 4. Final SEV-SNP Measurement
           SNP_HASH=$(cat sev_measurement.txt)
@@ -64,7 +64,7 @@ jobs:
 
           Every artifact below was compiled inside a deterministic Docker container (Ubuntu 24.04 + GCC 11.4.0 + Rust 1.95.0). You can reproduce these exact hashes on your own machine.
 
-          | Artifact | SHA-256 Hash |
+          | Artifact | SHA-384 Hash |
           | :--- | :--- |
           ENDOFNOTES
           echo "| **Initramfs** (zero_trust_os.cpio) | \`$CPIO_HASH\` |" >> release_notes.md
