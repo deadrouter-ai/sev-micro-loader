@@ -22,7 +22,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt update
-          sudo apt install -y build-essential flex bison libssl-dev libelf-dev wget rpm2cpio cpio jq python3 python3-pip ccache
+          sudo apt install -y build-essential flex bison libssl-dev libelf-dev wget rpm2cpio cpio jq python3 python3-pip ccache musl-tools
 
       - name: Setup Rust Toolchain
         run: |
@@ -43,6 +43,10 @@ jobs:
         with:
           target-dir: target
 
+      - name: Build Rust Bootloader
+        run: |
+          CC_x86_64_unknown_linux_musl=musl-gcc RUSTFLAGS="--remap-path-prefix $(pwd)=/workspace" cargo build --release --target x86_64-unknown-linux-musl
+
       - name: Build Linux Kernel (bzImage)
         run: |
           export PATH="/usr/lib/ccache:$PATH"
@@ -52,10 +56,6 @@ jobs:
           chmod +x build_kernel.sh
           ./build_kernel.sh
           ccache -s
-
-      - name: Build Rust Bootloader
-        run: |
-          RUSTFLAGS="--remap-path-prefix $(pwd)=/workspace" cargo build --release --target x86_64-unknown-linux-musl
 
       - name: Create Reproducible Initramfs (CPIO)
         run: |
@@ -134,5 +134,6 @@ jobs:
           files: |
             zero_trust_os.cpio
             sev_measurement.txt
+            linux-6.12.91/arch/x86/boot/bzImage
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
