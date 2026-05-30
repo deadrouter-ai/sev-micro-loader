@@ -18,7 +18,7 @@ A hardened, RAM-only, zero-trust initialization process (PID 1) designed specifi
 
 ### 1. 100% Reproducible Build (Recommended for Auditing)
 
-To guarantee that your locally compiled binaries produce the **exact same** SEV-SNP measurement hashes as the official GitHub Actions pipeline, you **must** use the provided Docker reproducible build script. This isolates the build in a pristine `ubuntu:26.04` environment with fixed GCC and Rust versions.
+To guarantee that your locally compiled binaries produce the **exact same** SEV-SNP measurement hashes as the official GitHub Actions pipeline, you **must** use the provided Docker reproducible build script. This isolates the build in a pristine `ubuntu:24.04` environment with fixed GCC and Rust versions.
 
 **Prerequisites:** You must have `docker` installed and running on your system.
 

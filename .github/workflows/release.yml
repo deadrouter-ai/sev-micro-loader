@@ -15,7 +15,7 @@ permissions:
 jobs:
   build_and_release:
     name: Build & Measure
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout Source Code
@@ -66,7 +66,7 @@ jobs:
           cat <<EOF > release_notes.md
           Below are the reproducible hashes for this build. You can compile the source code from this exact tag to verify these exact measurements.
 
-          > **Note**: Reproducible builds for the Linux Kernel require the exact same compiler version. You can run `./build_reproducible.sh` to compile these artifacts locally using a pristine **Ubuntu 26.04** Docker container with **GCC 11.4.0** and **Rust 1.95.0**.
+          > **Note**: Reproducible builds for the Linux Kernel require the exact same compiler version. You can run `./build_reproducible.sh` to compile these artifacts locally using a pristine **Ubuntu 24.04** Docker container with **GCC 11.4.0** and **Rust 1.95.0**.
 
           | Artifact | Hash |
           | :--- | :--- |
