@@ -331,7 +331,7 @@ fn prepare_system_env() {
 fn apply_kernel_hardening() {
     println!("[INIT] Applying runtime kernel hardening via sysfs...");
 
-    let sysctls = vec![
+    let sysctls: Vec<(&str, &[u8])> = vec![
         // 1. Prevent IP spoofing
         ("/proc/sys/net/ipv4/conf/all/rp_filter", b"1"),
         ("/proc/sys/net/ipv4/conf/default/rp_filter", b"1"),
