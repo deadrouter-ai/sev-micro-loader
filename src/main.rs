@@ -2,8 +2,9 @@ use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
+use std::os::unix::process::CommandExt;
 use std::sync::Arc;
-use sha2::{Sha384, Sha512, Digest};
+use aws_lc_rs::digest::{Context, SHA384, SHA512};
 use ed25519_dalek::{Verifier, VerifyingKey, Signature};
 use nix::mount::{mount, MsFlags};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -74,15 +75,7 @@ async fn main() {
         let payload_hash = args[2].clone();
         println!("[ATTEST] Starting isolated attestation server (PID {})", std::process::id());
         
-        // Drop privileges to 'nobody' (UID/GID 65534) to isolate TCP server from PID 1
-        unsafe {
-            if libc::setgid(65534) != 0 {
-                eprintln!("[ATTEST] Warning: Failed to setgid");
-            }
-            if libc::setuid(65534) != 0 {
-                eprintln!("[ATTEST] Warning: Failed to setuid");
-            }
-        }
+        // Note: Privileges are now safely dropped via CommandExt::uid() and gid() by the parent process.
 
         run_attestation_server(&payload_hash).await;
         std::process::exit(0);
@@ -109,8 +102,6 @@ async fn main() {
     // Build TLS config with MAXIMUM SECURITY:
     //   - TLS 1.3 ONLY (no protocol downgrade possible)
     //   - AES-256-GCM ONLY (no weaker ciphers)
-    //   - X25519MLKEM768 key exchange ONLY (post-quantum hybrid, resistant to
-    //     quantum computer attacks via ML-KEM-768 combined with X25519)
     //   - Embedded Mozilla CA root certificates (no host cert store used)
     //
     // In a bare initramfs there is no /etc/ssl/certs — we bake the CA
@@ -171,10 +162,10 @@ async fn main() {
     // ========================================================================
     // STEP 4: COMPUTE HASH
     // ========================================================================
-    let mut hasher = Sha384::new();
-    hasher.update(&app_bytes);
-    let runtime_hash = hasher.finalize();
-    let hash_hex = hex::encode(&runtime_hash);
+    let mut ctx = Context::new(&SHA384);
+    ctx.update(&app_bytes);
+    let runtime_hash = ctx.finish();
+    let hash_hex = base16ct::lower::encode_string(runtime_hash.as_ref());
     println!("[INIT] Payload SHA-384: {}", hash_hex);
 
     // ========================================================================
@@ -185,7 +176,7 @@ async fn main() {
         .unwrap_or_else(|e| panic_shutdown(&format!("Failed to write binary: {}", e)));
     drop(app_bytes);
 
-    std::fs::set_permissions(TARGET_PATH, Permissions::from_mode(0o500))
+    std::fs::set_permissions(TARGET_PATH, Permissions::from_mode(0o555))
         .unwrap_or_else(|e| panic_shutdown(&format!("Failed to chmod binary: {}", e)));
 
     // ========================================================================
@@ -204,6 +195,8 @@ async fn main() {
     let mut child = Command::new(TARGET_PATH)
         .env("ENV_PRODUCTION", "true")
         .env("LOADER_PAYLOAD_HASH", &hash_hex)
+        .uid(65534)
+        .gid(65534)
         .spawn()
         .unwrap_or_else(|e| panic_shutdown(&format!("Failed to spawn server: {}", e)));
 
@@ -222,37 +215,34 @@ async fn main() {
     }
 
     let current_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/init"));
-    let mut attest_child = Command::new(current_exe)
+    let attest_child = Command::new(current_exe)
         .arg("run-attestation-server")
         .arg(&hash_hex)
+        .uid(65534)
+        .gid(65534)
         .spawn()
         .unwrap_or_else(|e| panic_shutdown(&format!("Failed to spawn attestation server: {}", e)));
 
     let attest_pid = attest_child.id();
     println!("[INIT] Attestation server spawned as isolated PID {}.", attest_pid);
 
-    // Spawn child process monitor for the main payload server
-    tokio::task::spawn_blocking(move || {
-        match child.wait() {
-            Ok(status) => panic_shutdown(&format!("Server process (PID {}) exited with: {}. System integrity compromised.", child_pid, status)),
-            Err(e) => panic_shutdown(&format!("Failed to monitor server process: {}", e)),
-        }
-    });
-
-    // Spawn child process monitor for the attestation server
-    tokio::task::spawn_blocking(move || {
-        match attest_child.wait() {
-            Ok(status) => panic_shutdown(&format!("Attestation server (PID {}) exited with: {}. System integrity compromised.", attest_pid, status)),
-            Err(e) => panic_shutdown(&format!("Failed to monitor attestation server: {}", e)),
-        }
-    });
-
     println!("[INIT] Boot sequence complete. System operational. PID 1 entering watchdog mode.");
 
     // PID 1 watchdog & zombie reaper loop
     loop {
         // Reap any zombie children. PID 1 must do this in Linux.
-        unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG); }
+        loop {
+            let mut status = 0;
+            let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+            if pid <= 0 {
+                break;
+            }
+            if pid == child_pid as i32 {
+                panic_shutdown(&format!("Server process (PID {}) exited. System integrity compromised.", pid));
+            } else if pid == attest_pid as i32 {
+                panic_shutdown(&format!("Attestation server (PID {}) exited. System integrity compromised.", pid));
+            }
+        }
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
 }
@@ -292,7 +282,7 @@ fn prepare_system_env() {
     let _ = std::fs::create_dir_all("/run");
     mount(Some("tmpfs"), "/run", Some("tmpfs"),
           MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
-          Some("size=16m,mode=0700"))
+          Some("size=16m,mode=0755"))
         .unwrap_or_else(|e| panic_shutdown(&format!("Failed to mount /run: {}", e)));
 
     // /run/payload — dedicated tmpfs for the server binary.
@@ -302,7 +292,7 @@ fn prepare_system_env() {
         .unwrap_or_else(|e| panic_shutdown(&format!("Failed to create {}: {}", PAYLOAD_DIR, e)));
     mount(Some("tmpfs"), PAYLOAD_DIR, Some("tmpfs"),
           MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-          Some("size=256m,mode=0500"))
+          Some("size=256m,mode=0755"))
         .unwrap_or_else(|e| panic_shutdown(&format!("Failed to mount {}: {}", PAYLOAD_DIR, e)));
 
     // ---- NETWORK INTERFACE INITIALIZATION ----
@@ -398,9 +388,10 @@ fn apply_kernel_hardening() {
     ];
 
     for (path, val) in sysctls {
-        // We use a silent ignore because some sysctls won't exist if the underlying 
-        // kernel module is disabled entirely (e.g. BPF or kexec).
-        let _ = std::fs::write(path, val);
+        // We log a warning if it fails, but don't panic.
+        if let Err(e) = std::fs::write(path, val) {
+            eprintln!("[WARN] Failed to set sysctl {} to {:?}: {}", path, String::from_utf8_lossy(val), e);
+        }
     }
 }
 
@@ -679,10 +670,16 @@ async fn run_attestation_server(payload_hash_hex: &str) {
                     continue; // Perfectly normal network behavior
                 }
 
+                // Ignore file descriptor exhaustion but throttle to avoid tight spinloops
+                if e.raw_os_error() == Some(libc::EMFILE) || e.raw_os_error() == Some(libc::ENFILE) {
+                    eprintln!("[WARN] Attestation server out of file descriptors (EMFILE/ENFILE). Throttling...");
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+
                 consecutive_errors += 1;
                 eprintln!("[ATTEST] Accept error ({}/{}): {}", consecutive_errors, MAX_CONSECUTIVE_ERRORS, e);
                 
-                // Prevent tight spinloop on resource exhaustion (e.g. EMFILE)
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
@@ -701,23 +698,36 @@ async fn handle_attestation_connection(
     mut stream: tokio::net::TcpStream,
     payload_hash_hex: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Read the HTTP request (max 4KB — more than enough for a GET request)
-    let mut buf = [0u8; 4096];
-    let n = tokio::time::timeout(
-        std::time::Duration::from_secs(3), // strict timeout
-        stream.read(&mut buf)
-    ).await??;
+    // Read the HTTP request in a loop until \r\n\r\n
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        let n = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            stream.read(&mut chunk)
+        ).await {
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => return Ok(()), // Timeout
+        };
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        // Strict enforcement: max size to prevent memory exhaustion DoS
+        if buf.len() > 8192 {
+            return Ok(());
+        }
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
 
-    if n == 0 {
+    if buf.is_empty() {
         return Ok(());
     }
 
-    let request = String::from_utf8_lossy(&buf[..n]);
-    
-    // Strict enforcement: silently drop malformed requests
-    if !request.contains("\r\n\r\n") {
-        return Ok(()); // Anti-DoS: drop incomplete requests instantly
-    }
+    let request = String::from_utf8_lossy(&buf);
 
     let first_line = request.lines().next().unwrap_or("");
     let parts: Vec<&str> = first_line.split_whitespace().collect();
@@ -754,22 +764,29 @@ async fn handle_attestation_connection(
         return Ok(());
     }
 
-    let nonce_bytes = hex::decode(&nonce_hex)?;
+    let nonce_bytes = match base16ct::mixed::decode_vec(&nonce_hex) {
+        Ok(b) => b,
+        Err(_) => return Ok(()),
+    };
 
     // Decode payload hash
-    let payload_hash_bytes = hex::decode(payload_hash_hex)?;
+    let payload_hash_bytes = match base16ct::mixed::decode_vec(payload_hash_hex) {
+        Ok(b) => b,
+        Err(_) => return Ok(()),
+    };
 
     // Build the 64-byte report_data as SHA-512(payload_hash || nonce)
-    let mut hasher = Sha512::new();
-    hasher.update(&payload_hash_bytes);
-    hasher.update(&nonce_bytes);
-    let report_data_hash = hasher.finalize();
+    let mut ctx = Context::new(&SHA512);
+    ctx.update(&payload_hash_bytes);
+    ctx.update(&nonce_bytes);
+    let report_data_hash = ctx.finish();
     let mut report_data = [0u8; 64];
-    report_data.copy_from_slice(&report_data_hash);
+    report_data.copy_from_slice(report_data_hash.as_ref());
 
+    use base64ct::{Base64Url, Encoding};
     // Request SEV-SNP attestation report from hardware
-    let (report_hex, platform) = match get_snp_attestation_report(&report_data) {
-        Ok(report) => (hex::encode(&report), "amd-sev-snp"),
+    let (report_b64, platform) = match get_snp_attestation_report(&report_data) {
+        Ok(report) => (Base64Url::encode_string(&report), "amd-sev-snp"),
         Err(err) => {
             // Not running on SEV-SNP hardware — return error with context
             let body = format!(
@@ -790,14 +807,14 @@ async fn handle_attestation_connection(
             "  \"nonce\": \"{}\",\n",
             "  \"payload_sha384\": \"{}\",\n",
             "  \"report_data_hex\": \"{}\",\n",
-            "  \"attestation_report_hex\": \"{}\"\n",
+            "  \"attestation_report\": \"{}\"\n",
             "}}"
         ),
         platform,
         nonce_hex,
         payload_hash_hex,
-        hex::encode(&report_data),
-        report_hex,
+        base16ct::lower::encode_string(&report_data),
+        report_b64,
     );
 
     send_http_response(&mut stream, 200, "application/json", &body).await?;

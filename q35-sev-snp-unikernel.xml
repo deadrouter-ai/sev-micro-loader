@@ -1,0 +1,69 @@
+<domain type='kvm'>
+  <name>rust-unikernel-node</name>
+  <vcpu placement='static'>2</vcpu>
+  
+  <memory unit='GiB'>2</memory>
+  <currentMemory unit='GiB'>4</currentMemory>
+  <memoryBacking>
+    <!-- Essential for SEV-SNP: memory cannot be swapped to disk -->
+    <locked/> 
+  </memoryBacking>
+  
+  <os>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <loader readonly='yes' type='pflash'>/usr/share/edk2/ovmf/OVMF.amdsev.fd</loader>
+    
+    <kernel>/var/lib/libvirt/images/custom_tenant/bzImage</kernel>
+    <initrd>/var/lib/libvirt/images/custom_tenant/zero_trust_os.cpio</initrd>
+    <cmdline>console=ttyS0 ip=dhcp quiet loglevel=0 random.trust_cpu=on random.trust_bootloader=off amd_iommu=force_isolation iommu.strict=1 iommu.passthrough=0 mitigations=auto,nosmt spectre_v2=on pti=on gather_data_sampling=force srso=safe-ret retbleed=auto,nosmt lockdown=confidentiality</cmdline>
+  </os>
+
+  <cpu mode='custom' match='exact'>
+    <model fallback='forbid'>EPYC-v3</model>
+    <!-- Explicitly enforce 1 thread per core to mitigate cross-thread hardware side-channels -->
+    <topology sockets='1' dies='1' cores='2' threads='1'/>
+  </cpu>
+
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    
+    <!-- Network with required IOMMU for SEV-SNP DMA bounce buffers -->
+    <interface type='network'>
+      <source network='default'/>
+      <model type='virtio'/>
+      <driver name='vhost' iommu='on'/> 
+    </interface>
+    
+    <console type='pty'>
+      <target type='serial' port='0'/>
+    </console>
+
+    <!-- Attack Surface Reduction -->
+    <!-- Disable memory ballooning -->
+    <memballoon model='none'/>
+    <!-- Disable all unneeded virtual peripherals to close QEMU breakout vectors -->
+    <video><model type='none'/></video>
+    <sound model='none'/>
+    <controller type='usb' model='none'/>
+    <input type='keyboard' bus='usb' model='none'/>
+    <input type='mouse' bus='usb' model='none'/>
+    <input type='tablet' bus='usb' model='none'/>
+    <smartcard mode='none'/>
+    <watchdog model='none'/>
+  </devices>
+
+  <!-- AMD SEV-SNP Hardware Configuration -->
+  <launchSecurity type='sev-snp'>
+    <cbitpos>47</cbitpos> 
+    <reducedPhysBits>1</reducedPhysBits>
+    <!-- 
+      Policy 0x30000: 
+      Bit 16 (0x10000) = SMT allowed (Many host providers require this to boot)
+      Bit 17 (0x20000) = Migration agent allowed
+      *Note: If provider allows it, changing this to 0x20000.*
+    -->
+    <policy>0x30000</policy> 
+    <!-- Enforce hardware measurement of the kernel, initrd, and cmdline -->
+    <kernelHashes>yes</kernelHashes>
+  </launchSecurity>
+</domain>

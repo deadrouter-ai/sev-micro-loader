@@ -72,7 +72,7 @@ $DOCKER run --rm --network host \
             --ovmf=./usr/share/edk2/ovmf/OVMF.amdsev.fd \
             --kernel=./linux-kernel/arch/x86/boot/bzImage \
             --initrd=./zero_trust_os.cpio \
-            --append="console=ttyS0 ip=dhcp mitigations=auto,nosmt spectre_v2=on pti=on gather_data_sampling=force" | tr -d "\n" > sev_measurement.txt
+            --append="console=ttyS0 ip=dhcp quiet loglevel=0 random.trust_cpu=on random.trust_bootloader=off amd_iommu=force_isolation iommu.strict=1 iommu.passthrough=0 mitigations=auto,nosmt spectre_v2=on pti=on gather_data_sampling=force srso=safe-ret retbleed=auto,nosmt lockdown=confidentiality" | tr -d "\n" > sev_measurement.txt
 
         echo "=== FINAL SEV-SNP MEASUREMENT ==="
         cat sev_measurement.txt

@@ -9,16 +9,14 @@ tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "fs", "time
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 # Embedded TLS root certificates (Mozilla CA store baked into the binary)
-# Required because initramfs has no /etc/ssl/certs — no system CA bundle exists.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 webpki-roots = "1.0"
 
-# Cryptography and Hashing
-sha2 = "0.11"
+# Cryptography and Hashing (FIPS validated)
+aws-lc-rs = { version = "1.17", features = ["fips"] }
 ed25519-dalek = "2"
-
-# Hex encoding for hash display
-hex = "0.4"
+base64ct = { version = "1.8.3", features = ["alloc"] }
+base16ct = { version = "1.0.0", features = ["alloc"] }
 
 # Low-level Linux system calls for mounting filesystems, ioctl, fork
 nix = { version = "0.31", features = ["fs", "mount", "process"] }

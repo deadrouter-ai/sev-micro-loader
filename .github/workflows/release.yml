@@ -46,13 +46,17 @@ jobs:
           # 3. Static OVMF Hash
           OVMF_HASH=$(sha384sum usr/share/edk2/ovmf/OVMF.amdsev.fd | awk '{print $1}')
           
-          # 4. Final SEV-SNP Measurement
+          # 4. Libvirt XML Hash
+          XML_HASH=$(sha384sum q35-sev-snp-unikernel.xml | awk '{print $1}')
+          
+          # 5. Final SEV-SNP Measurement
           SNP_HASH=$(cat sev_measurement.txt)
 
           # Output to GitHub Actions environment
           echo "CPIO_HASH=$CPIO_HASH" >> $GITHUB_ENV
           echo "KERNEL_BZIMAGE_HASH=$KERNEL_BZIMAGE_HASH" >> $GITHUB_ENV
           echo "OVMF_HASH=$OVMF_HASH" >> $GITHUB_ENV
+          echo "XML_HASH=$XML_HASH" >> $GITHUB_ENV
           echo "SNP_HASH=$SNP_HASH" >> $GITHUB_ENV
 
       - name: Generate Release Notes
@@ -70,6 +74,7 @@ jobs:
           echo "| **Initramfs** (zero_trust_os.cpio) | \`$CPIO_HASH\` |" >> release_notes.md
           echo "| **Linux Kernel** (bzImage) | \`$KERNEL_BZIMAGE_HASH\` |" >> release_notes.md
           echo "| **OVMF Firmware** (OVMF.amdsev.fd) | \`$OVMF_HASH\` |" >> release_notes.md
+          echo "| **Libvirt Template** (q35-sev-snp-unikernel.xml) | \`$XML_HASH\` |" >> release_notes.md
           echo "| **SEV-SNP Measurement** | \`$SNP_HASH\` |" >> release_notes.md
           cat >> release_notes.md <<'ENDOFNOTES'
 
@@ -108,6 +113,7 @@ jobs:
             sev_measurement.txt
             linux-kernel/arch/x86/boot/bzImage
             usr/share/edk2/ovmf/OVMF.amdsev.fd
+            q35-sev-snp-unikernel.xml
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -119,5 +125,6 @@ jobs:
             sev_measurement.txt
             linux-kernel/arch/x86/boot/bzImage
             usr/share/edk2/ovmf/OVMF.amdsev.fd
+            q35-sev-snp-unikernel.xml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
