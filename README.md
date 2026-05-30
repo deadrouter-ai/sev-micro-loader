@@ -1,166 +1,258 @@
-# Confidential Micro-Loader (Zero-Trust Bootloader)
+# Confidential Micro-Loader
 
-A hardened, RAM-only, zero-trust initialization process (PID 1) designed specifically for AMD SEV-SNP environments. It guarantees that the workload executing inside the confidential enclave is authentic, untampered, and fully isolated.
-
-## Table of Contents
-- [What is it?](docs/architecture.md)
-- [Threat Model](docs/threat_model.md)
-- [Step-by-Step Guide](#step-by-step-guide)
-  - [100% Reproducible Build (Recommended for Auditing)](#1-100-reproducible-build-recommended-for-auditing)
-  - [Native Compilation (For Local Testing)](#2-native-compilation-for-local-testing)
-  - [Compilation](#3-compilation)
-  - [Verification (SEV-SNP Measurement)](#4-verification-sev-snp-measurement)
-  - [Local Testing (QEMU)](#5-local-testing-qemu)
+### A Zero-Trust Bootloader for AMD SEV-SNP Confidential Virtual Machines
 
 ---
 
-## Step-by-Step Guide
+## What Problem Does This Solve?
 
-### 1. 100% Reproducible Build (Recommended for Auditing)
+When you use a cloud server (AWS, Azure, Google Cloud, etc.), you are trusting the cloud provider with **everything**: your data, your code, and your encryption keys. The provider's employees, their hypervisor software, and even their hardware could theoretically spy on or modify your workload.
 
-To guarantee that your locally compiled binaries produce the **exact same** SEV-SNP measurement hashes as the official GitHub Actions pipeline, you **must** use the provided Docker reproducible build script. This isolates the build in a pristine `ubuntu:24.04` environment with fixed GCC and Rust versions.
+**This project eliminates that trust requirement entirely.**
 
-**Prerequisites:** You must have `docker` installed and running on your system.
+Using AMD's [SEV-SNP](https://www.amd.com/en/developer/sev.html) hardware technology, this bootloader creates a **cryptographically sealed environment** where:
 
+- ☑️ **Nobody** can see inside the virtual machine — not the cloud provider, not their employees
+- ☑️ **Nobody** can modify the code running inside — not even the person who deployed it
+- ☑️ **Anyone** can mathematically prove exactly what code is running
+- ☑️ **Everything** is open source — the bootloader, the kernel, the build process
+
+> **In simple terms:** Imagine a locked safe that even the locksmith can't open. You can look through a window to verify what's inside, but nobody can change its contents after it's been sealed.
+
+---
+
+## How It Works
+
+```mermaid
+flowchart TB
+    subgraph SEV["🔒 AMD SEV-SNP Encrypted VM"]
+        direction TB
+        K["🐧 Hardened Linux Kernel"]
+        ML["⚙️ Micro-Loader — PID 1"]
+        DL["📥 Downloads server binary from public GitHub"]
+        SIG["🔏 Verifies Ed25519 signature"]
+        LOCK["🔐 Locks filesystem read-only"]
+        SRV["🖥️ Runs verified server"]
+        ATT["📋 Attestation Server on port 8080"]
+        K --> ML --> DL --> SIG --> LOCK --> SRV
+        ML --> ATT
+    end
+    USER["👤 Any User / Auditor"] -->|"1. Read open-source code"| ML
+    USER -->|"2. Compile locally"| ML
+    USER -->|"3. Compare measurement"| ATT
+    ATT -->|"Hardware-signed proof"| USER
+```
+
+### Boot Sequence
+
+```mermaid
+sequenceDiagram
+    participant HW as AMD Secure Processor
+    participant K as Linux Kernel
+    participant ML as Micro-Loader PID 1
+    participant GH as GitHub Releases
+    participant SRV as Server Process
+    participant U as User / Auditor
+    HW->>HW: Measure kernel + initramfs
+    K->>ML: Start as PID 1
+    ML->>ML: Mount filesystems and configure DNS
+    ML->>GH: Download server binary via HTTPS
+    ML->>GH: Download detached signature
+    ML->>ML: Verify Ed25519 signature
+    Note over ML: HALT if signature fails
+    ML->>ML: Write binary then remount READ-ONLY
+    ML->>SRV: Spawn as child process
+    ML->>ML: Start attestation server on port 8080
+    U->>ML: GET /v1/attestation?nonce=random
+    ML->>HW: Request signed report
+    HW->>ML: Return hardware-signed report
+    ML->>U: Cryptographic proof of running code
+```
+
+---
+
+## Table of Contents
+
+- [Why a Micro-Loader Instead of Just the Server?](#why-a-micro-loader-instead-of-just-the-server)
+- [Threat Model Summary](#threat-model-summary)
+- [How to Verify (For Non-Technical Users)](#how-to-verify-for-non-technical-users)
+- [Step-by-Step Build Guide](#step-by-step-build-guide)
+- [Compute the SEV-SNP Measurement](#compute-the-sev-snp-measurement)
+- [Local Testing with QEMU](#local-testing-with-qemu)
+- [Full Documentation](#full-documentation)
+
+---
+
+## Why a Micro-Loader Instead of Just the Server?
+
+The VM does **not** contain the actual server software directly. Instead, it contains a tiny, auditable "loader" that fetches the real server at boot time from a public GitHub release. This is a deliberate security design with three layers of protection:
+
+| Layer | What It Protects Against | How |
+|:---|:---|:---|
+| **Source is public** | Hidden backdoors | The server is built from a public open-source repo using GitHub Actions. Anyone can read the source and compile it themselves. |
+| **URL is hardcoded** | Redirection attacks | The download URL is compiled into the measured binary. The loader cannot download from anywhere else. Changing the URL changes the measurement. |
+| **Signature is required** | Tampered releases | Every binary must carry a valid Ed25519 signature. The public key is hardcoded. Even if GitHub is compromised, unsigned code is rejected. |
+
+> The loader is ~750 lines of Rust — small enough to audit completely in an afternoon.
+
+---
+
+## Threat Model Summary
+
+| Threat | Attacker | Mitigation |
+|:---|:---|:---|
+| **Cloud provider spies on VM** | Provider | AMD SEV-SNP encrypts all VM memory with a hardware key the provider cannot access |
+| **Provider modifies boot code** | Provider | AMD Secure Processor measures kernel+initramfs. Any change alters the measurement |
+| **DNS hijacking** | Provider/Network | DNS resolvers hardcoded (Quad9 + Cloudflare). DHCP DNS ignored |
+| **TLS interception** | Provider/State | Mozilla CA store embedded in binary. No host cert store used |
+| **GitHub serves malicious binary** | GitHub/State | Downloaded binary requires valid Ed25519 signature. Only owner holds private key |
+| **Owner pushes backdoor** | Owner | Server source is public. Build pipeline is public GitHub Actions. Anyone can audit |
+| **Server exploit** | Attacker | Binary on READ-ONLY mount. Writable dirs are NOEXEC. No shell or SSH exists |
+| **Kernel module injection** | Any | Kernel compiled with `CONFIG_MODULES=n`. Modules disabled at compile time |
+| **Physical RAM access** | Datacenter | SEV-SNP hardware encryption. Physical access yields only ciphertext |
+
+> 📖 Full details: [Threat Model](docs/threat_model.md) · [Loader Security Audit](docs/loader_security.md) · [Architecture](docs/architecture.md)
+
+---
+
+## How to Verify (For Non-Technical Users)
+
+1. **Compile the same source code** on your computer (the build script does everything automatically)
+2. **Your computer produces a measurement** — a unique fingerprint of the code
+3. **Ask the live server** for its measurement — AMD hardware signs it with an unforgeable key
+4. **If the numbers match**, you have mathematical proof the server runs the audited code
+
+> No trust required. No one's word. Pure mathematics.
+
+---
+
+## Step-by-Step Build Guide
+
+### Option A: Reproducible Build (Recommended)
+
+This guarantees **byte-for-byte identical** binaries to the official release.
+
+**Prerequisites:** [Docker](https://docs.docker.com/get-docker/) must be installed and running.
+
+<details>
+<summary><b>How to install Docker (click to expand)</b></summary>
+
+**Ubuntu / Debian:**
 ```bash
+sudo apt update && sudo apt install -y docker.io
+sudo systemctl start docker && sudo systemctl enable docker
+sudo usermod -aG docker $USER
+# Log out and back in, then verify:
+docker run hello-world
+```
+
+**macOS:** Install [Docker Desktop for Mac](https://docs.docker.com/desktop/install/mac-install/)
+
+**Windows:** Install [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/) with WSL2 backend
+
+</details>
+
+**Build:**
+```bash
+git clone https://github.com/deadrouter-ai/sev-micro-loader.git
+cd sev-micro-loader
+git checkout v0.0.5-alpha  # Replace with the release tag you want to verify
 ./build_reproducible.sh
 ```
 
-This single command will automatically:
-1. Build a fixed Docker environment (`sev-reproducible-builder`).
-2. Compile the hardened Linux kernel (`bzImage`).
-3. Compile the Rust Micro-Loader (`zero_trust_os.cpio`).
-4. Download the OVMF firmware and compute the final SEV-SNP measurement.
+When finished, the script prints the **Final SEV-SNP Measurement**. Compare it against the [GitHub Release page](https://github.com/deadrouter-ai/sev-micro-loader/releases).
 
-When the script finishes, it will print the exact mathematical SEV-SNP measurement that you can compare against the release!
+> **Why Docker?** Different compiler versions produce different binaries. Docker ensures everyone uses the exact same compiler (Ubuntu 24.04 + GCC 11.4.0 + Rust 1.95.0).
 
 ---
 
-### 2. Native Compilation (For Local Testing)
+### Option B: Native Build (For Developers)
 
-> **IMPORTANT:** Compiling natively on your host OS (e.g., Debian, Fedora, or newer Ubuntu) will result in different binaries and hashes due to compiler toolchain differences. **Do not use native compilation for verifying official releases.**
-
-**Prerequisites**
-
-First, install the necessary system dependencies (Debian/Ubuntu example):
+> ⚠️ Native builds produce different hashes. Use for development only, not for verifying releases.
 
 ```bash
-sudo apt update
-sudo apt install -y build-essential flex bison libssl-dev libelf-dev wget rpm2cpio cpio jq
-```
+# Install dependencies (Ubuntu/Debian)
+sudo apt install -y build-essential flex bison libssl-dev libelf-dev wget rpm2cpio cpio jq python3 python3-pip ccache musl-tools bc
 
-Install Rust and the required `musl` target for static compilation:
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.95.0
 source $HOME/.cargo/env
 rustup target add x86_64-unknown-linux-musl
+
+# Build kernel
+chmod +x build_kernel.sh && ./build_kernel.sh
+
+# Build micro-loader
+RUSTFLAGS="--remap-path-prefix $(pwd)=/workspace" cargo build --locked --release --target x86_64-unknown-linux-musl
+
+# Create initramfs
+mkdir -p rootfs/proc rootfs/sys rootfs/dev rootfs/tmp
+cp target/x86_64-unknown-linux-musl/release/sev-micro-loader rootfs/init
+find rootfs -exec touch -h -d @0 {} +
+cd rootfs && find . -mindepth 1 | LC_ALL=C sort | cpio -o -H newc -R 0:0 --reproducible > ../zero_trust_os.cpio && cd ..
 ```
 
-### 3. Compilation
+---
 
-**IMPORTANT:** If you intend to compute SEV-SNP measurements for verification, you must compile from the **Latest Release** rather than the active `main` branch. Active code changes frequently, which will result in different measurements from the official release!
+## Compute the SEV-SNP Measurement
 
-1. **Compile the hardened Linux kernel:**
-   ```bash
-   chmod +x build_kernel.sh
-   ./build_kernel.sh
-   ```
+```bash
+# Clone measurement tool
+git clone https://github.com/virtee/sev-snp-measure.git
+pip3 install -r sev-snp-measure/requirements.txt --break-system-packages
 
-2. **Compile the Micro-Loader (Deterministically):**
-   To ensure the resulting binary has the exact same hash across different computers (reproducible build), we strip the absolute paths using `RUSTFLAGS`:
-   ```bash
-   RUSTFLAGS="--remap-path-prefix $(pwd)=/workspace" cargo build --release --target x86_64-unknown-linux-musl
-   ```
+# Download OVMF firmware
+wget -q https://download.rockylinux.org/pub/rocky/10.1/devel/x86_64/os/Packages/e/edk2-ovmf-20250523-2.el10.noarch.rpm
+rpm2cpio edk2-ovmf-20250523-2.el10.noarch.rpm | cpio -idmv
 
-3. **Create the ephemeral initramfs (rootfs) deterministically:**
-   To guarantee the `cpio` archive produces the exact same hash every time, we must zero out the timestamps of the files and use `cpio`'s reproducible flag:
-   ```bash
-   # Create an ephemeral directory architecture
-   mkdir -p rootfs/proc rootfs/sys rootfs/dev rootfs/tmp
+# Verify OVMF hash
+echo "950daf793754f7a8bd85b716d2ebf77b96d49724671a2ab12cf3a9607f1aa8fe  usr/share/edk2/ovmf/OVMF.amdsev.fd" | sha256sum -c
 
-   # Copy your compiled binary straight into the execution root under the name 'init'
-   cp target/x86_64-unknown-linux-musl/release/sev-micro-loader rootfs/init
+# Compute measurement
+python3 sev-snp-measure/sev-snp-measure.py \
+    --mode snp --vcpus=2 --vcpu-type=EPYC-v3 \
+    --ovmf=./usr/share/edk2/ovmf/OVMF.amdsev.fd \
+    --kernel=./linux-6.12.91/arch/x86/boot/bzImage \
+    --initrd=./zero_trust_os.cpio \
+    --append="console=ttyS0 ip=dhcp"
+```
 
-   # Zero out the timestamps of the rootfs files so the archive hash is identical everywhere
-   find rootfs -exec touch -h -d @0 {} +
+Compare the output with the **Final SEV-SNP Measurement** from the [Release page](https://github.com/deadrouter-ai/sev-micro-loader/releases).
 
-   # Create the reproducible initramfs
-   cd rootfs
-   find . -mindepth 1 | LC_ALL=C sort | cpio -o -H newc -R 0:0 --reproducible > ../zero_trust_os.cpio
-   cd ..
-   ```
+---
 
-At this point, you have two paths: compute the SEV-SNP measurement for auditing, or run it locally in QEMU.
+## Local Testing with QEMU
 
-### 4. Verification (SEV-SNP Measurement)
+```bash
+qemu-system-x86_64 \
+    -kernel linux-6.12.91/arch/x86/boot/bzImage \
+    -initrd zero_trust_os.cpio \
+    -m 1024 -nographic -no-reboot \
+    -append "console=ttyS0 ip=dhcp" \
+    -netdev user,id=net0,hostfwd=tcp::8080-:8080 \
+    -device virtio-net-pci,netdev=net0
+```
 
-To verify the integrity of the enclave natively, you can compute the expected SEV-SNP measurement offline and compare it against the live attestation report.
+Test attestation (from another terminal):
+```bash
+curl -s "http://localhost:8080/v1/attestation?nonce=$(openssl rand -hex 32)" | python3 -m json.tool
+```
 
-1. **Clone the measurement utility:**
-   ```bash
-   git clone https://github.com/virtee/sev-snp-measure.git
-   cd sev-snp-measure
-   ```
+> On non-SEV hardware, the response will be `snp_unavailable`. This is normal for local testing.
 
-2. **Download and verify the OVMF firmware:**
-   We use an audited build of OVMF. Download and extract it:
-   ```bash
-   wget https://download.rockylinux.org/pub/rocky/10.1/devel/x86_64/os/Packages/e/edk2-ovmf-20250523-2.el10.noarch.rpm
-   rpm2cpio edk2-ovmf-20250523-2.el10.noarch.rpm | cpio -idmv
-   ```
+---
 
-   **Verify the firmware hash:**
-   ```bash
-   EXPECTED_HASH="950daf793754f7a8bd85b716d2ebf77b96d49724671a2ab12cf3a9607f1aa8fe"
-   ACTUAL_HASH=$(sha256sum usr/share/edk2/ovmf/OVMF.amdsev.fd | awk '{print $1}')
-   if [ "$EXPECTED_HASH" = "$ACTUAL_HASH" ]; then echo "✅ OVMF Hash Match!"; else echo "❌ Hash Mismatch!"; fi
-   ```
+## Full Documentation
 
-3. **Compute the measurement:**
-   *(Ensure paths to your kernel and initrd are correct relative to your current directory)*
-   ```bash
-   ./sev-snp-measure.py \
-       --mode snp \
-       --vcpus=2 \
-       --vcpu-type=EPYC-v3 \
-       --ovmf=./usr/share/edk2/ovmf/OVMF.amdsev.fd \
-       --kernel=../linux-6.12.91/arch/x86/boot/bzImage \
-       --initrd=../zero_trust_os.cpio \
-       --append="console=ttyS0 ip=dhcp"
-   ```
+| Document | Description |
+|:---|:---|
+| [Architecture](docs/architecture.md) | Detailed boot process and system design |
+| [Threat Model](docs/threat_model.md) | Comprehensive threat analysis with mitigations |
+| [Loader Security Audit](docs/loader_security.md) | Why runtime-fetching is safe — detailed analysis |
+| [Reproducible Builds](docs/reproducible_builds.md) | How and why the build process is deterministic |
 
-This will output a raw hexadecimal measurement (e.g., `0409cb2e91890852f7d71e4c605d023d27fe0f7e97ffa1c34067e0957a6ebd85749485b73127f24ba112ba5c2559e306`). You compare this value against the measurement provided by the server's live attestation to ensure the executing code is exactly what you audited.
+---
 
-### 5. Local Testing (QEMU)
+## License
 
-You can run the environment locally using QEMU to test functionality. 
-
-1. **Run the VM:**
-   ```bash
-   qemu-system-x86_64 \
-     -kernel linux-6.12.91/arch/x86/boot/bzImage \
-     -initrd zero_trust_os.cpio \
-     -m 1024 \
-     -nographic \
-     -no-reboot \
-     -append "console=ttyS0 ip=dhcp" \
-     -netdev user,id=net0,hostfwd=tcp::8080-:8080 \
-     -device virtio-net-pci,netdev=net0
-   ```
-
-2. **Test the Attestation Endpoint:**
-   From another terminal, fetch an attestation report:
-   ```bash
-   curl -s "http://localhost:8080/v1/attestation?nonce=$(openssl rand -hex 32)" | jq
-   ```
-
-   *Note: Unless you are running on an AMD EPYC 7003 series processor (or newer) with SEV-SNP enabled, the hardware attestation will fail with a simulated error. This is normal and expected for local testing:*
-   ```json
-   {
-     "error": "snp_unavailable",
-     "message": "SEV-SNP device not available (/dev/sev-guest not found)",
-     "payload_sha256": "417146051425dd1a39060efb8d3541f611727edfddfc7bd94866694e3d76de41",
-     "nonce": "353b8ba65d3a3130b1fd2c8ed138f6798bce7d1c85c6194e9f184878cbb118e5"
-   }
-   ```
+This project is open source. See [LICENSE](LICENSE) for details.

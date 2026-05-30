@@ -29,11 +29,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-kernel-ccache-
 
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          target-dir: target
-
       - name: Run Reproducible Build in Docker
         run: |
           chmod +x build_reproducible.sh
@@ -63,20 +58,50 @@ jobs:
       - name: Generate Release Notes
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          cat <<EOF > release_notes.md
-          Below are the reproducible hashes for this build. You can compile the source code from this exact tag to verify these exact measurements.
+          TAG="${GITHUB_REF#refs/tags/}"
+          cat > release_notes.md <<'ENDOFNOTES'
+          ## Reproducible Build Hashes
 
-          > **Note**: Reproducible builds for the Linux Kernel require the exact same compiler version. You can run `./build_reproducible.sh` to compile these artifacts locally using a pristine **Ubuntu 24.04** Docker container with **GCC 11.4.0** and **Rust 1.95.0**.
+          Every artifact below was compiled inside a deterministic Docker container (Ubuntu 24.04 + GCC 11.4.0 + Rust 1.95.0). You can reproduce these exact hashes on your own machine.
 
-          | Artifact | Hash |
+          | Artifact | SHA-256 Hash |
           | :--- | :--- |
-          | **1. Initramfs (CPIO)** | \`${{ env.CPIO_HASH }}\` |
-          | **2. Linux Kernel (bzImage)** | \`${{ env.KERNEL_BZIMAGE_HASH }}\` |
-          | **3. OVMF Firmware** | \`${{ env.OVMF_HASH }}\` |
-          | **4. Final SEV-SNP Measurement** | \`${{ env.SNP_HASH }}\` |
+          ENDOFNOTES
+          echo "| **Initramfs** (zero_trust_os.cpio) | \`$CPIO_HASH\` |" >> release_notes.md
+          echo "| **Linux Kernel** (bzImage) | \`$KERNEL_BZIMAGE_HASH\` |" >> release_notes.md
+          echo "| **OVMF Firmware** (OVMF.amdsev.fd) | \`$OVMF_HASH\` |" >> release_notes.md
+          echo "| **SEV-SNP Measurement** | \`$SNP_HASH\` |" >> release_notes.md
+          cat >> release_notes.md <<'ENDOFNOTES'
 
-          The final SEV-SNP Measurement should match the \`attestation_report_hex\` value returned by the live hardware attestation.
-          EOF
+          The **SEV-SNP Measurement** is the value that AMD hardware will report in the attestation. If your locally computed measurement matches this value, you have mathematical proof that the release binary was compiled from this exact source code.
+
+          ---
+
+          ## How to Verify This Release
+
+          **Prerequisites:** [Docker](https://docs.docker.com/get-docker/) must be installed.
+
+          ```bash
+          git clone https://github.com/deadrouter-ai/sev-micro-loader.git
+          cd sev-micro-loader
+          ENDOFNOTES
+          echo "git checkout ${TAG}" >> release_notes.md
+          cat >> release_notes.md <<'ENDOFNOTES'
+          ./build_reproducible.sh
+          ```
+
+          When the script finishes, it prints the **Final SEV-SNP Measurement**. If it matches the value in the table above, the release is authentic and unmodified.
+
+          > **Why Docker?** Different compiler versions produce different binaries. The Docker container ensures everyone uses the exact same toolchain, so the output is identical regardless of your host OS.
+
+          ---
+
+          ## Security Model
+
+          - All download URLs and the Ed25519 signing key are **hardcoded** in the measured binary
+          - The server source code is **fully public** — [view it here](https://github.com/deadrouter-ai/api-proxy-server)
+          - Full documentation: [Threat Model](https://github.com/deadrouter-ai/sev-micro-loader/blob/main/docs/threat_model.md) · [Loader Security Audit](https://github.com/deadrouter-ai/sev-micro-loader/blob/main/docs/loader_security.md) · [Architecture](https://github.com/deadrouter-ai/sev-micro-loader/blob/main/docs/architecture.md)
+          ENDOFNOTES
 
       - name: Attest Build Provenance
         if: startsWith(github.ref, 'refs/tags/')
