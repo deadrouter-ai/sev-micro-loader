@@ -105,6 +105,7 @@ echo "Compiling the kernel (this will take a few minutes)..."
 export KBUILD_BUILD_TIMESTAMP="1970-01-01 00:00:00"
 export KBUILD_BUILD_USER="builder"
 export KBUILD_BUILD_HOST="buildhost"
+export KBUILD_BUILD_VERSION="1"
 export SOURCE_DATE_EPOCH=0
 make -j$(nproc) bzImage
 

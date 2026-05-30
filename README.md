@@ -6,16 +6,41 @@ A hardened, RAM-only, zero-trust initialization process (PID 1) designed specifi
 - [What is it?](docs/architecture.md)
 - [Threat Model](docs/threat_model.md)
 - [Step-by-Step Guide](#step-by-step-guide)
-  - [Prerequisites](#1-prerequisites)
-  - [Compilation](#2-compilation)
-  - [Verification (SEV-SNP Measurement)](#3-verification-sev-snp-measurement)
-  - [Local Testing (QEMU)](#4-local-testing-qemu)
+  - [100% Reproducible Build (Recommended for Auditing)](#1-100-reproducible-build-recommended-for-auditing)
+  - [Native Compilation (For Local Testing)](#2-native-compilation-for-local-testing)
+  - [Compilation](#3-compilation)
+  - [Verification (SEV-SNP Measurement)](#4-verification-sev-snp-measurement)
+  - [Local Testing (QEMU)](#5-local-testing-qemu)
 
 ---
 
 ## Step-by-Step Guide
 
-### 1. Prerequisites
+### 1. 100% Reproducible Build (Recommended for Auditing)
+
+To guarantee that your locally compiled binaries produce the **exact same** SEV-SNP measurement hashes as the official GitHub Actions pipeline, you **must** use the provided Docker reproducible build script. This isolates the build in a pristine `ubuntu:26.04` environment with fixed GCC and Rust versions.
+
+**Prerequisites:** You must have `docker` installed and running on your system.
+
+```bash
+./build_reproducible.sh
+```
+
+This single command will automatically:
+1. Build a fixed Docker environment (`sev-reproducible-builder`).
+2. Compile the hardened Linux kernel (`bzImage`).
+3. Compile the Rust Micro-Loader (`zero_trust_os.cpio`).
+4. Download the OVMF firmware and compute the final SEV-SNP measurement.
+
+When the script finishes, it will print the exact mathematical SEV-SNP measurement that you can compare against the release!
+
+---
+
+### 2. Native Compilation (For Local Testing)
+
+> **IMPORTANT:** Compiling natively on your host OS (e.g., Debian, Fedora, or newer Ubuntu) will result in different binaries and hashes due to compiler toolchain differences. **Do not use native compilation for verifying official releases.**
+
+**Prerequisites**
 
 First, install the necessary system dependencies (Debian/Ubuntu example):
 
@@ -32,7 +57,7 @@ source $HOME/.cargo/env
 rustup target add x86_64-unknown-linux-musl
 ```
 
-### 2. Compilation
+### 3. Compilation
 
 **IMPORTANT:** If you intend to compute SEV-SNP measurements for verification, you must compile from the **Latest Release** rather than the active `main` branch. Active code changes frequently, which will result in different measurements from the official release!
 
@@ -68,9 +93,9 @@ rustup target add x86_64-unknown-linux-musl
 
 At this point, you have two paths: compute the SEV-SNP measurement for auditing, or run it locally in QEMU.
 
-### 3. Verification (SEV-SNP Measurement)
+### 4. Verification (SEV-SNP Measurement)
 
-To verify the integrity of the enclave, you can compute the expected SEV-SNP measurement offline and compare it against the live attestation report.
+To verify the integrity of the enclave natively, you can compute the expected SEV-SNP measurement offline and compare it against the live attestation report.
 
 1. **Clone the measurement utility:**
    ```bash
@@ -107,7 +132,7 @@ To verify the integrity of the enclave, you can compute the expected SEV-SNP mea
 
 This will output a raw hexadecimal measurement (e.g., `0409cb2e91890852f7d71e4c605d023d27fe0f7e97ffa1c34067e0957a6ebd85749485b73127f24ba112ba5c2559e306`). You compare this value against the measurement provided by the server's live attestation to ensure the executing code is exactly what you audited.
 
-### 4. Local Testing (QEMU)
+### 5. Local Testing (QEMU)
 
 You can run the environment locally using QEMU to test functionality. 
 

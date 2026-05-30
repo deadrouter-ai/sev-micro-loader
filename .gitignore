@@ -3,3 +3,6 @@
 /rootfs
 zero_trust_os.cpio
 linux.tar.xz
+edk2-ovmf-20250523-2.el10.noarch.rpm
+sev_measurement.txt
+usr/

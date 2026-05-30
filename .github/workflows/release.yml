@@ -9,26 +9,17 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build_and_release:
     name: Build & Measure
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
-
-      - name: Install System Dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y build-essential flex bison libssl-dev libelf-dev wget rpm2cpio cpio jq python3 python3-pip ccache musl-tools
-
-      - name: Setup Rust Toolchain
-        run: |
-          rustup toolchain install 1.95.0
-          rustup default 1.95.0
-          rustup target add x86_64-unknown-linux-musl
 
       - name: Cache Kernel ccache
         uses: actions/cache@v4
@@ -43,46 +34,10 @@ jobs:
         with:
           target-dir: target
 
-      - name: Build Rust Bootloader
+      - name: Run Reproducible Build in Docker
         run: |
-          CC_x86_64_unknown_linux_musl=musl-gcc RUSTFLAGS="--remap-path-prefix $(pwd)=/workspace" cargo build --release --target x86_64-unknown-linux-musl
-
-      - name: Build Linux Kernel (bzImage)
-        run: |
-          export PATH="/usr/lib/ccache:$PATH"
-          export CCACHE_DIR=~/.cache/ccache
-          ccache -M 2G
-          ccache -z
-          chmod +x build_kernel.sh
-          ./build_kernel.sh
-          ccache -s
-
-      - name: Create Reproducible Initramfs (CPIO)
-        run: |
-          mkdir -p rootfs/proc rootfs/sys rootfs/dev rootfs/tmp
-          cp target/x86_64-unknown-linux-musl/release/sev-micro-loader rootfs/init
-          find rootfs -exec touch -h -d @0 {} +
-          cd rootfs
-          find . -mindepth 1 | LC_ALL=C sort | cpio -o -H newc -R 0:0 --reproducible > ../zero_trust_os.cpio
-          cd ..
-
-      - name: Prepare SEV-SNP Measurement Tools
-        run: |
-          git clone https://github.com/virtee/sev-snp-measure.git
-          wget https://download.rockylinux.org/pub/rocky/10.1/devel/x86_64/os/Packages/e/edk2-ovmf-20250523-2.el10.noarch.rpm
-          rpm2cpio edk2-ovmf-20250523-2.el10.noarch.rpm | cpio -idmv
-
-      - name: Compute SEV-SNP Measurement
-        run: |
-          pip3 install -r ./sev-snp-measure/requirements.txt
-          python3 ./sev-snp-measure/sev-snp-measure.py \
-              --mode snp \
-              --vcpus=2 \
-              --vcpu-type=EPYC-v3 \
-              --ovmf=./usr/share/edk2/ovmf/OVMF.amdsev.fd \
-              --kernel=./linux-6.12.91/arch/x86/boot/bzImage \
-              --initrd=./zero_trust_os.cpio \
-              --append="console=ttyS0 ip=dhcp" > sev_measurement.txt
+          chmod +x build_reproducible.sh
+          ./build_reproducible.sh
 
       - name: Generate Hashes for Release Notes
         id: hashes
@@ -109,14 +64,11 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           cat <<EOF > release_notes.md
-          ## Confidential Micro-Loader Release
+          Below are the reproducible hashes for this build. You can compile the source code from this exact tag to verify these exact measurements.
 
-          This release contains the fully reproducible \`zero_trust_os.cpio\` RAM-only bootloader filesystem.
+          > **Note**: Reproducible builds for the Linux Kernel require the exact same compiler version. You can run `./build_reproducible.sh` to compile these artifacts locally using a pristine **Ubuntu 26.04** Docker container with **GCC 11.4.0** and **Rust 1.95.0**.
 
-          ### Mathematical Auditing & Verification
-          Below are the reproducible SHA-256 hashes for this build. You can compile the source code from this exact tag to verify these exact measurements.
-
-          | Artifact | SHA-256 Hash |
+          | Artifact | Hash |
           | :--- | :--- |
           | **1. Initramfs (CPIO)** | \`${{ env.CPIO_HASH }}\` |
           | **2. Linux Kernel (bzImage)** | \`${{ env.KERNEL_BZIMAGE_HASH }}\` |
@@ -125,6 +77,16 @@ jobs:
 
           The final SEV-SNP Measurement should match the \`attestation_report_hex\` value returned by the live hardware attestation.
           EOF
+
+      - name: Attest Build Provenance
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            zero_trust_os.cpio
+            sev_measurement.txt
+            linux-6.12.91/arch/x86/boot/bzImage
+            usr/share/edk2/ovmf/OVMF.amdsev.fd
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -135,5 +97,6 @@ jobs:
             zero_trust_os.cpio
             sev_measurement.txt
             linux-6.12.91/arch/x86/boot/bzImage
+            usr/share/edk2/ovmf/OVMF.amdsev.fd
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
