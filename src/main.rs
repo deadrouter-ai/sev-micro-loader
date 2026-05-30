@@ -320,7 +320,88 @@ fn prepare_system_env() {
     std::fs::write("/etc/resolv.conf", "nameserver 9.9.9.9\nnameserver 1.1.1.1\n")
         .unwrap_or_else(|e| panic_shutdown(&format!("Failed to write /etc/resolv.conf: {}", e)));
 
+    apply_kernel_hardening();
+
     println!("[INIT] Filesystem environment ready.");
+}
+
+// ============================================================================
+// RUNTIME KERNEL HARDENING
+// ============================================================================
+fn apply_kernel_hardening() {
+    println!("[INIT] Applying runtime kernel hardening via sysfs...");
+
+    let sysctls = vec![
+        // 1. Prevent IP spoofing
+        ("/proc/sys/net/ipv4/conf/all/rp_filter", b"1"),
+        ("/proc/sys/net/ipv4/conf/default/rp_filter", b"1"),
+        
+        // 2. Prevent MITM ICMP redirects
+        ("/proc/sys/net/ipv4/conf/all/accept_redirects", b"0"),
+        ("/proc/sys/net/ipv4/conf/default/accept_redirects", b"0"),
+        ("/proc/sys/net/ipv4/conf/all/send_redirects", b"0"),
+        ("/proc/sys/net/ipv4/conf/default/send_redirects", b"0"),
+        ("/proc/sys/net/ipv4/conf/all/secure_redirects", b"0"),
+        ("/proc/sys/net/ipv4/conf/default/secure_redirects", b"0"),
+
+        // 3. Ignore ICMP broadcasts (Smurf attacks) & bogus errors
+        ("/proc/sys/net/ipv4/icmp_echo_ignore_broadcasts", b"1"),
+        ("/proc/sys/net/ipv4/icmp_ignore_bogus_error_responses", b"1"),
+
+        // 4. TCP Hardening (SYN cookies, time-wait assassination)
+        ("/proc/sys/net/ipv4/tcp_syncookies", b"1"),
+        ("/proc/sys/net/ipv4/tcp_rfc1337", b"1"),
+
+        // 5. Restrict kernel pointers and dmesg
+        ("/proc/sys/kernel/kptr_restrict", b"2"),
+        ("/proc/sys/kernel/dmesg_restrict", b"1"),
+
+        // 6. Disable unprivileged BPF and userfaultfd (Defense in depth)
+        ("/proc/sys/kernel/unprivileged_bpf_disabled", b"1"),
+        ("/proc/sys/vm/unprivileged_userfaultfd", b"0"),
+
+        // 7. YAMA ptrace scope: 3 = No ptrace allowed at all
+        ("/proc/sys/kernel/yama/ptrace_scope", b"3"),
+        
+        // 8. Disable Kexec loading
+        ("/proc/sys/kernel/kexec_load_disabled", b"1"),
+        
+        // 9. Perf event profiling restriction
+        ("/proc/sys/kernel/perf_event_paranoid", b"3"),
+
+        // 10. Protect VFS symlinks and hardlinks
+        ("/proc/sys/fs/protected_symlinks", b"1"),
+        ("/proc/sys/fs/protected_hardlinks", b"1"),
+        ("/proc/sys/fs/protected_fifos", b"2"),
+        ("/proc/sys/fs/protected_regular", b"2"),
+
+        // 11. TCP/IP DDoS Mitigation & Performance Tuning
+        // Increase socket queue size to handle high concurrency spikes
+        ("/proc/sys/net/core/somaxconn", b"8192"),
+        // Increase the maximum number of packets queued on the input side
+        ("/proc/sys/net/core/netdev_max_backlog", b"16384"),
+        // Increase SYN backlog to absorb SYN floods before falling back to cookies
+        ("/proc/sys/net/ipv4/tcp_max_syn_backlog", b"8192"),
+        // Drop dead/half-open connections much faster (default is usually 5 retries / 60s)
+        ("/proc/sys/net/ipv4/tcp_synack_retries", b"2"),
+        ("/proc/sys/net/ipv4/tcp_fin_timeout", b"10"),
+        // Aggressively kill idle/zombie connections (Keepalive: 60s idle, 10s interval, 6 probes)
+        ("/proc/sys/net/ipv4/tcp_keepalive_time", b"60"),
+        ("/proc/sys/net/ipv4/tcp_keepalive_intvl", b"10"),
+        ("/proc/sys/net/ipv4/tcp_keepalive_probes", b"6"),
+        // Prevent Out-Of-Memory from orphaned sockets
+        ("/proc/sys/net/ipv4/tcp_max_orphans", b"16384"),
+        // Safely reuse TIME-WAIT sockets for new connections to avoid port exhaustion
+        ("/proc/sys/net/ipv4/tcp_tw_reuse", b"1"),
+        // Complete stealth mode: ignore all pings to avoid discovery and ICMP floods
+        ("/proc/sys/net/ipv4/icmp_echo_ignore_all", b"1"),
+    ];
+
+    for (path, val) in sysctls {
+        // We use a silent ignore because some sysctls won't exist if the underlying 
+        // kernel module is disabled entirely (e.g. BPF or kexec).
+        let _ = std::fs::write(path, val);
+    }
 }
 
 // ============================================================================

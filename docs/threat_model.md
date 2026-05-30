@@ -27,8 +27,6 @@ flowchart TB
     OWNER -->|"Cannot inject unsigned code"| TRUSTED
 ```
 
----
-
 ## Threat Catalog
 
 ### 1. Malicious Cloud Provider
@@ -98,8 +96,6 @@ Datacenter staff or anyone with physical access to the server hardware.
 | **Cold boot attack** | Freeze RAM and extract keys | SEV-SNP uses **AES-128 hardware encryption** for all guest memory. Physical RAM access yields only ciphertext. | ✅ Mitigated |
 | **DMA attack** | Use PCIe/DMA devices to read guest memory | SEV-SNP Reverse Map Table (RMP) enforces that host DMA cannot access guest-encrypted pages. | ✅ Mitigated |
 | **Replace hardware** | Swap the CPU with a compromised one | SEV-SNP attestation includes the platform identity. A different CPU produces a different attestation chain that fails verification against AMD's public VCEK certificates. | ✅ Mitigated |
-
----
 
 ## What Is NOT Protected
 

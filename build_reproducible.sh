@@ -70,9 +70,9 @@ $DOCKER run --rm --network host \
             --vcpus=2 \
             --vcpu-type=EPYC-v3 \
             --ovmf=./usr/share/edk2/ovmf/OVMF.amdsev.fd \
-            --kernel=./linux-6.12.91/arch/x86/boot/bzImage \
+            --kernel=./linux-kernel/arch/x86/boot/bzImage \
             --initrd=./zero_trust_os.cpio \
-            --append="console=ttyS0 ip=dhcp" | tr -d "\n" > sev_measurement.txt
+            --append="console=ttyS0 ip=dhcp mitigations=auto,nosmt spectre_v2=on pti=on gather_data_sampling=force" | tr -d "\n" > sev_measurement.txt
 
         echo "=== FINAL SEV-SNP MEASUREMENT ==="
         cat sev_measurement.txt

@@ -1,9 +1,5 @@
 # Confidential Micro-Loader
 
-### A Zero-Trust Bootloader for AMD SEV-SNP Confidential Virtual Machines
-
----
-
 ## What Problem Does This Solve?
 
 When you use a cloud server (AWS, Azure, Google Cloud, etc.), you are trusting the cloud provider with **everything**: your data, your code, and your encryption keys. The provider's employees, their hypervisor software, and even their hardware could theoretically spy on or modify your workload.
@@ -18,8 +14,6 @@ Using AMD's [SEV-SNP](https://www.amd.com/en/developer/sev.html) hardware techno
 - ☑️ **Everything** is open source — the bootloader, the kernel, the build process
 
 > **In simple terms:** Imagine a locked safe that even the locksmith can't open. You can look through a window to verify what's inside, but nobody can change its contents after it's been sealed.
-
----
 
 ## How It Works
 
@@ -69,8 +63,6 @@ sequenceDiagram
     ML->>U: Cryptographic proof of running code
 ```
 
----
-
 ## Table of Contents
 
 - [Why a Micro-Loader Instead of Just the Server?](#why-a-micro-loader-instead-of-just-the-server)
@@ -80,8 +72,6 @@ sequenceDiagram
 - [Compute the SEV-SNP Measurement](#compute-the-sev-snp-measurement)
 - [Local Testing with QEMU](#local-testing-with-qemu)
 - [Full Documentation](#full-documentation)
-
----
 
 ## Why a Micro-Loader Instead of Just the Server?
 
@@ -94,8 +84,6 @@ The VM does **not** contain the actual server software directly. Instead, it con
 | **Signature is required** | Tampered releases | Every binary must carry a valid Ed25519 signature. The public key is hardcoded. Even if GitHub is compromised, unsigned code is rejected. |
 
 > The loader is ~750 lines of Rust — small enough to audit completely in an afternoon.
-
----
 
 ## Threat Model Summary
 
@@ -114,8 +102,6 @@ The VM does **not** contain the actual server software directly. Instead, it con
 
 > 📖 Full details: [Threat Model](docs/threat_model.md) · [Loader Security Audit](docs/loader_security.md) · [Architecture](docs/architecture.md)
 
----
-
 ## How to Verify (For Non-Technical Users)
 
 1. **Compile the same source code** on your computer (the build script does everything automatically)
@@ -124,8 +110,6 @@ The VM does **not** contain the actual server software directly. Instead, it con
 4. **If the numbers match**, you have mathematical proof the server runs the audited code
 
 > No trust required. No one's word. Pure mathematics.
-
----
 
 ## Step-by-Step Build Guide
 
@@ -165,8 +149,6 @@ When finished, the script prints the **Final SEV-SNP Measurement**. Compare it a
 
 > **Why Docker?** Different compiler versions produce different binaries. Docker ensures everyone uses the exact same compiler (Ubuntu 24.04 + GCC 11.4.0 + Rust 1.95.0).
 
----
-
 ### Option B: Native Build (For Developers)
 
 > ⚠️ Native builds produce different hashes. Use for development only, not for verifying releases.
@@ -193,8 +175,6 @@ find rootfs -exec touch -h -d @0 {} +
 cd rootfs && find . -mindepth 1 | LC_ALL=C sort | cpio -o -H newc -R 0:0 --reproducible > ../zero_trust_os.cpio && cd ..
 ```
 
----
-
 ## Compute the SEV-SNP Measurement
 
 ```bash
@@ -213,23 +193,21 @@ echo "8082ac81116050b9d2757e99985c23672ba88d397632f6cb1487a553cf31ef5736edad3717
 python3 sev-snp-measure/sev-snp-measure.py \
     --mode snp --vcpus=2 --vcpu-type=EPYC-v3 \
     --ovmf=./usr/share/edk2/ovmf/OVMF.amdsev.fd \
-    --kernel=./linux-6.12.91/arch/x86/boot/bzImage \
+    --kernel=./linux-kernel/arch/x86/boot/bzImage \
     --initrd=./zero_trust_os.cpio \
-    --append="console=ttyS0 ip=dhcp"
+    --append="console=ttyS0 ip=dhcp mitigations=auto,nosmt spectre_v2=on pti=on gather_data_sampling=force"
 ```
 
 Compare the output with the **Final SEV-SNP Measurement** from the [Release page](https://github.com/deadrouter-ai/sev-micro-loader/releases).
-
----
 
 ## Local Testing with QEMU
 
 ```bash
 qemu-system-x86_64 \
-    -kernel linux-6.12.91/arch/x86/boot/bzImage \
+    -kernel linux-kernel/arch/x86/boot/bzImage \
     -initrd zero_trust_os.cpio \
     -m 1024 -nographic -no-reboot \
-    -append "console=ttyS0 ip=dhcp" \
+    -append "console=ttyS0 ip=dhcp mitigations=auto,nosmt spectre_v2=on pti=on gather_data_sampling=force" \
     -netdev user,id=net0,hostfwd=tcp::8080-:8080 \
     -device virtio-net-pci,netdev=net0
 ```
@@ -242,8 +220,6 @@ curl -s "http://localhost:8080/v1/attestation?nonce=$(openssl rand -hex 64)" | p
 > On non-SEV hardware, the response will be `snp_unavailable`. This is normal for local testing.
 > The attestation endpoint accepts any user-defined nonce from 1 to 128 bytes in hex format (2 to 256 characters).
 
----
-
 ## Full Documentation
 
 | Document | Description |
@@ -252,8 +228,6 @@ curl -s "http://localhost:8080/v1/attestation?nonce=$(openssl rand -hex 64)" | p
 | [Threat Model](docs/threat_model.md) | Comprehensive threat analysis with mitigations |
 | [Loader Security Audit](docs/loader_security.md) | Why runtime-fetching is safe — detailed analysis |
 | [Reproducible Builds](docs/reproducible_builds.md) | How and why the build process is deterministic |
-
----
 
 ## License
 

@@ -4,8 +4,6 @@
 
 The Confidential Micro-Loader uses an unusual architecture: instead of packaging the server application directly into the measured boot image, it **downloads** the server at runtime from a public GitHub release. This document provides a detailed security audit of this design choice, explaining why it does not introduce vulnerabilities and how multiple independent layers prevent abuse.
 
----
-
 ## The Architecture
 
 ```mermaid
@@ -55,8 +53,6 @@ These URLs are part of the **measured binary**. Changing them would:
 
 **Verdict: ✅ Not a vulnerability.** The URLs cannot be changed without detection.
 
----
-
 ### Question 2: Can the owner push a backdoored server update?
 
 **Technically possible, but immediately detectable.** Here's why this attack fails in practice:
@@ -90,8 +86,6 @@ This makes the downloaded server **exactly as verifiable** as the loader itself 
 - The server process cannot modify PID 1 (it's a child process with no privilege over its parent)
 - If the server process tries to interfere with port 8080 (e.g., crash the loader), the **entire VM immediately shuts down** — PID 1 death = kernel panic
 
----
-
 ### Question 3: Can GitHub serve a malicious binary?
 
 **No.** Even if GitHub (or a state-level attacker that has compromised GitHub) replaces the binary on the release page, the attack fails:
@@ -110,8 +104,6 @@ This makes the downloaded server **exactly as verifiable** as the loader itself 
 
 **Verdict: ✅ Not a vulnerability.** GitHub cannot forge the owner's signature.
 
----
-
 ### Question 4: Can a state-level attacker compromise the TLS/CA system?
 
 **A compromised CA allows intercepting the download, but not bypassing signature verification.**
@@ -124,8 +116,6 @@ Defense: The Ed25519 signature is a **completely independent verification layer*
 - The VM shuts down on the invalid signature ✅
 
 **Verdict: ✅ Defense in depth works.** TLS is the first layer; Ed25519 is the second, independent layer.
-
----
 
 ### Question 5: What about the runtime filesystem after download?
 
@@ -145,8 +135,6 @@ After the binary is verified and written to disk, the loader performs a complete
 - Cannot open a shell (no shell binary exists anywhere in the filesystem)
 - Cannot persist across reboot (everything is RAM-only, no disk)
 
----
-
 ### Question 6: Why not just include the server in the boot image?
 
 Including the server in the boot image would mean:
@@ -159,8 +147,6 @@ With the current architecture:
 - The server can be updated without changing the measurement
 - Updates still require the owner's cryptographic signature
 - The small loader is easy for anyone to audit completely
-
----
 
 ### Question 7: What if a malicious binary somehow gets through all defenses?
 
@@ -184,8 +170,6 @@ Even in the theoretical worst case where every defense layer fails and a malicio
    A malicious binary cannot operate silently. Any attempt to interfere with the system kills the entire VM, making the compromise immediately visible to monitoring.
 
 5. **No persistence.** Everything is RAM-only. There is no disk. A reboot starts fresh from the measured boot image. The attacker gains nothing lasting.
-
----
 
 ## Summary of Defense Layers
 

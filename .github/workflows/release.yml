@@ -41,7 +41,7 @@ jobs:
           CPIO_HASH=$(sha384sum zero_trust_os.cpio | awk '{print $1}')
           
           # 2. bzImage SHA-384 (Kernel build folder contains absolute paths in .cmd files)
-          KERNEL_BZIMAGE_HASH=$(sha384sum linux-6.12.91/arch/x86/boot/bzImage | awk '{print $1}')
+          KERNEL_BZIMAGE_HASH=$(sha384sum linux-kernel/arch/x86/boot/bzImage | awk '{print $1}')
           
           # 3. Static OVMF Hash
           OVMF_HASH=$(sha384sum usr/share/edk2/ovmf/OVMF.amdsev.fd | awk '{print $1}')
@@ -75,8 +75,6 @@ jobs:
 
           The **SEV-SNP Measurement** is the value that AMD hardware will report in the attestation. If your locally computed measurement matches this value, you have mathematical proof that the release binary was compiled from this exact source code.
 
-          ---
-
           ## How to Verify This Release
 
           **Prerequisites:** [Docker](https://docs.docker.com/get-docker/) must be installed.
@@ -94,8 +92,6 @@ jobs:
 
           > **Why Docker?** Different compiler versions produce different binaries. The Docker container ensures everyone uses the exact same toolchain, so the output is identical regardless of your host OS.
 
-          ---
-
           ## Security Model
 
           - All download URLs and the Ed25519 signing key are **hardcoded** in the measured binary
@@ -110,7 +106,7 @@ jobs:
           subject-path: |
             zero_trust_os.cpio
             sev_measurement.txt
-            linux-6.12.91/arch/x86/boot/bzImage
+            linux-kernel/arch/x86/boot/bzImage
             usr/share/edk2/ovmf/OVMF.amdsev.fd
 
       - name: Publish GitHub Release
@@ -121,7 +117,7 @@ jobs:
           files: |
             zero_trust_os.cpio
             sev_measurement.txt
-            linux-6.12.91/arch/x86/boot/bzImage
+            linux-kernel/arch/x86/boot/bzImage
             usr/share/edk2/ovmf/OVMF.amdsev.fd
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

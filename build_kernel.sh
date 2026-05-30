@@ -1,13 +1,14 @@
 #!/bin/bash
 set -e
 
-# Use the latest 6.12 LTS kernel for maximum security patching and stability
-KERNEL_VER="6.12.91"
+KERNEL_VER="6.18.33"
 
 echo "Downloading Linux kernel source v$KERNEL_VER..."
 wget -qO linux.tar.xz "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VER}.tar.xz"
 tar -xf linux.tar.xz
-cd linux-${KERNEL_VER}
+rm -rf linux-kernel
+mv linux-${KERNEL_VER} linux-kernel
+cd linux-kernel
 
 echo "Configuring minimal KVM guest kernel..."
 make defconfig
@@ -88,12 +89,27 @@ scripts/config --enable CONFIG_SECURITY_LOCKDOWN_LSM_EARLY
 scripts/config --enable CONFIG_SECURITY_YAMA
 scripts/config --set-str CONFIG_LSM "lockdown,yama"
 
-# 8. Strip massive unnecessary subsystems
+# 8. Strip massive unnecessary subsystems & Legacy Network Protocols
 scripts/config --disable CONFIG_SOUND
 scripts/config --disable CONFIG_IO_URING
 scripts/config --disable CONFIG_KSM
 scripts/config --disable CONFIG_VT
 scripts/config --disable CONFIG_NUMA
+scripts/config --disable CONFIG_SCTP
+scripts/config --disable CONFIG_DCCP
+scripts/config --disable CONFIG_RDS
+scripts/config --disable CONFIG_TIPC
+scripts/config --disable CONFIG_ATM
+scripts/config --disable CONFIG_L2TP
+scripts/config --disable CONFIG_BRIDGE
+scripts/config --disable CONFIG_VLAN_8021Q
+scripts/config --disable CONFIG_DECNET
+scripts/config --disable CONFIG_IPX
+scripts/config --disable CONFIG_APPLETALK
+scripts/config --disable CONFIG_X25
+scripts/config --disable CONFIG_NET_SCHED
+scripts/config --disable CONFIG_NETFILTER
+scripts/config --disable CONFIG_BPF_JIT
 scripts/config --disable CONFIG_WLAN
 scripts/config --disable CONFIG_BT
 scripts/config --disable CONFIG_DRM
@@ -120,11 +136,38 @@ scripts/config --disable CONFIG_NTFS_FS
 scripts/config --disable CONFIG_NETWORK_FILESYSTEMS
 scripts/config --disable CONFIG_MISC_FILESYSTEMS
 
-# 9. Nuke Debugging Info
+# 9. Advanced Memory & Structure Hardening (Kicksecure/KSPP Defaults)
+scripts/config --enable CONFIG_INIT_STACK_ALL_ZERO
+scripts/config --enable CONFIG_GCC_PLUGIN_RANDSTRUCT
+scripts/config --enable CONFIG_GCC_PLUGIN_STRUCTLEAK_BYREF_ALL
+scripts/config --enable CONFIG_PAGE_POISONING
+scripts/config --enable CONFIG_VMAP_STACK
+scripts/config --enable CONFIG_SECRETMEM
+
+# 10. Syscall & Application Security
+scripts/config --enable CONFIG_SECCOMP
+scripts/config --enable CONFIG_SECCOMP_FILTER
+scripts/config --disable CONFIG_SYSFS_SYSCALL
+scripts/config --disable CONFIG_USELIB
+
+# 11. Defense in Depth for Kernel Symbols
+scripts/config --enable CONFIG_TRIM_UNUSED_KSYMS
+
+# 12. Nuke Debugging Info
 scripts/config --disable CONFIG_DEBUG_INFO
 scripts/config --enable CONFIG_DEBUG_INFO_NONE
 scripts/config --disable CONFIG_DEBUG_KERNEL
 scripts/config --disable CONFIG_KALLSYMS_ALL
+
+# 13. Kicksecure / KSPP Additon
+scripts/config --disable CONFIG_USERFAULTFD
+scripts/config --disable CONFIG_X86_MSR
+scripts/config --disable CONFIG_LDISC_AUTOLOAD
+scripts/config --disable CONFIG_LIVEPATCH
+scripts/config --disable CONFIG_ACPI_TABLE_UPGRADE
+scripts/config --disable CONFIG_DEVPORT
+scripts/config --enable CONFIG_SLUB_DEBUG
+scripts/config --enable CONFIG_SLUB_DEBUG_ON
 
 echo "Resolving dependencies and finalizing configuration..."
 make olddefconfig
@@ -138,4 +181,4 @@ export SOURCE_DATE_EPOCH=0
 make -j$(nproc) bzImage
 
 echo ""
-echo "Done! Kernel is at: linux-${KERNEL_VER}/arch/x86/boot/bzImage"
+echo "Done! Kernel is at: linux-kernel/arch/x86/boot/bzImage"
