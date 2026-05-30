@@ -9,6 +9,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build_and_release:
@@ -125,6 +127,15 @@ jobs:
 
           The final SEV-SNP Measurement should match the \`attestation_report_hex\` value returned by the live hardware attestation.
           EOF
+
+      - name: Attest Build Provenance
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            zero_trust_os.cpio
+            sev_measurement.txt
+            linux-6.12.91/arch/x86/boot/bzImage
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
