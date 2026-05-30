@@ -37,27 +37,37 @@ jobs:
       - name: Generate Hashes for Release Notes
         id: hashes
         run: |
-          # 1. zero_trust_os.cpio SHA-384
+          # 1. zero_trust_os.cpio SHA-384 and SHA-256
           CPIO_HASH=$(sha384sum zero_trust_os.cpio | awk '{print $1}')
+          CPIO_SHA256=$(sha256sum zero_trust_os.cpio | awk '{print $1}')
           
-          # 2. bzImage SHA-384 (Kernel build folder contains absolute paths in .cmd files)
+          # 2. bzImage SHA-384 and SHA-256
           KERNEL_BZIMAGE_HASH=$(sha384sum linux-kernel/arch/x86/boot/bzImage | awk '{print $1}')
+          KERNEL_BZIMAGE_SHA256=$(sha256sum linux-kernel/arch/x86/boot/bzImage | awk '{print $1}')
           
-          # 3. Static OVMF Hash
+          # 3. Static OVMF Hash and SHA-256
           OVMF_HASH=$(sha384sum usr/share/edk2/ovmf/OVMF.amdsev.fd | awk '{print $1}')
+          OVMF_SHA256=$(sha256sum usr/share/edk2/ovmf/OVMF.amdsev.fd | awk '{print $1}')
           
-          # 4. Libvirt XML Hash
+          # 4. Libvirt XML Hash and SHA-256
           XML_HASH=$(sha384sum q35-sev-snp-unikernel.xml | awk '{print $1}')
+          XML_SHA256=$(sha256sum q35-sev-snp-unikernel.xml | awk '{print $1}')
           
-          # 5. Final SEV-SNP Measurement
+          # 5. Final SEV-SNP Measurement and TXT SHA-256
           SNP_HASH=$(cat sev_measurement.txt)
+          SNP_TXT_SHA256=$(sha256sum sev_measurement.txt | awk '{print $1}')
 
           # Output to GitHub Actions environment
           echo "CPIO_HASH=$CPIO_HASH" >> $GITHUB_ENV
+          echo "CPIO_SHA256=$CPIO_SHA256" >> $GITHUB_ENV
           echo "KERNEL_BZIMAGE_HASH=$KERNEL_BZIMAGE_HASH" >> $GITHUB_ENV
+          echo "KERNEL_BZIMAGE_SHA256=$KERNEL_BZIMAGE_SHA256" >> $GITHUB_ENV
           echo "OVMF_HASH=$OVMF_HASH" >> $GITHUB_ENV
+          echo "OVMF_SHA256=$OVMF_SHA256" >> $GITHUB_ENV
           echo "XML_HASH=$XML_HASH" >> $GITHUB_ENV
+          echo "XML_SHA256=$XML_SHA256" >> $GITHUB_ENV
           echo "SNP_HASH=$SNP_HASH" >> $GITHUB_ENV
+          echo "SNP_TXT_SHA256=$SNP_TXT_SHA256" >> $GITHUB_ENV
 
       - name: Generate Release Notes
         if: startsWith(github.ref, 'refs/tags/')
@@ -68,14 +78,14 @@ jobs:
 
           Every artifact below was compiled inside a deterministic Docker container (Ubuntu 24.04 + GCC 11.4.0 + Rust 1.95.0). You can reproduce these exact hashes on your own machine.
 
-          | Artifact | SHA-384 Hash |
-          | :--- | :--- |
+          | Artifact | SHA-384 Hash | Digest (SHA-256) | Attestation Report |
+          | :--- | :--- | :--- | :--- |
           ENDOFNOTES
-          echo "| **Initramfs** (zero_trust_os.cpio) | \`$CPIO_HASH\` |" >> release_notes.md
-          echo "| **Linux Kernel** (bzImage) | \`$KERNEL_BZIMAGE_HASH\` |" >> release_notes.md
-          echo "| **OVMF Firmware** (OVMF.amdsev.fd) | \`$OVMF_HASH\` |" >> release_notes.md
-          echo "| **Libvirt Template** (q35-sev-snp-unikernel.xml) | \`$XML_HASH\` |" >> release_notes.md
-          echo "| **SEV-SNP Measurement** | \`$SNP_HASH\` |" >> release_notes.md
+          echo "| **Initramfs** (zero_trust_os.cpio) | \`$CPIO_HASH\` | \`$CPIO_SHA256\` | [View Attestation](https://search.sigstore.dev/?hash=sha256:$CPIO_SHA256) |" >> release_notes.md
+          echo "| **Linux Kernel** (bzImage) | \`$KERNEL_BZIMAGE_HASH\` | \`$KERNEL_BZIMAGE_SHA256\` | [View Attestation](https://search.sigstore.dev/?hash=sha256:$KERNEL_BZIMAGE_SHA256) |" >> release_notes.md
+          echo "| **OVMF Firmware** (OVMF.amdsev.fd) | \`$OVMF_HASH\` | \`$OVMF_SHA256\` | [View Attestation](https://search.sigstore.dev/?hash=sha256:$OVMF_SHA256) |" >> release_notes.md
+          echo "| **Libvirt Template** (q35-sev-snp-unikernel.xml) | \`$XML_HASH\` | \`$XML_SHA256\` | [View Attestation](https://search.sigstore.dev/?hash=sha256:$XML_SHA256) |" >> release_notes.md
+          echo "| **SEV-SNP Measurement** (sev_measurement.txt) | \`$SNP_HASH\` | \`$SNP_TXT_SHA256\` | [View Attestation](https://search.sigstore.dev/?hash=sha256:$SNP_TXT_SHA256) |" >> release_notes.md
           cat >> release_notes.md <<'ENDOFNOTES'
 
           The **SEV-SNP Measurement** is the value that AMD hardware will report in the attestation. If your locally computed measurement matches this value, you have mathematical proof that the release binary was compiled from this exact source code.

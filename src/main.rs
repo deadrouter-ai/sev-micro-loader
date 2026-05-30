@@ -4,8 +4,8 @@ use std::path::Path;
 use std::process::Command;
 use std::os::unix::process::CommandExt;
 use std::sync::Arc;
-use aws_lc_rs::digest::{Context, SHA384, SHA512};
-use ed25519_dalek::{Verifier, VerifyingKey, Signature};
+use aws_lc_rs::digest::{Context, SHA256, SHA384, SHA512};
+use aws_lc_rs::signature::{UnparsedPublicKey, ECDSA_P384_SHA384_FIXED};
 use nix::mount::{mount, MsFlags};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -13,20 +13,29 @@ use tokio::net::TcpListener;
 // ============================================================================
 // HARDCODED CRITICAL TRUST ANCHORS
 // ============================================================================
-// Ed25519 public key — MUST be replaced with real production key before deploy.
-const PUBLIC_KEY_BYTES: [u8; 32] = [
-    0x1a, 0x15, 0xf3, 0x98, 0x31, 0xd2, 0x7f, 0x93, 
-    0x0c, 0x6a, 0xb9, 0xeb, 0x3d, 0xb3, 0x72, 0xdb, 
-    0x25, 0xa4, 0x7a, 0xf7, 0x89, 0xdc, 0x64, 0xd8, 
-    0xc9, 0xcc, 0xc8, 0xe4, 0x36, 0xc4, 0x8e, 0xb0, 
+const PUBLIC_KEY_BYTES: [u8; 97] = [
+    0x04, 0xf0, 0x7c, 0x7f, 0x7c, 0xb0, 0x87, 0x82, 
+    0x38, 0x1d, 0x72, 0x91, 0xf0, 0xcc, 0xc2, 0xcd, 
+    0xa4, 0x8c, 0x6b, 0x06, 0x21, 0xdc, 0x73, 0x1a, 
+    0xf0, 0x83, 0x62, 0xcf, 0xfc, 0x97, 0x89, 0x9d, 
+    0xc1, 0x06, 0xd8, 0x44, 0x12, 0x50, 0xa3, 0xca, 
+    0x41, 0xf0, 0x20, 0xd8, 0xfd, 0x0f, 0x41, 0xc6, 
+    0x19, 0xe9, 0x11, 0x76, 0x14, 0x26, 0xd8, 0x23, 
+    0xe9, 0xb0, 0xb0, 0xc8, 0x8c, 0x94, 0x73, 0xb0, 
+    0xe7, 0xd5, 0x9c, 0xce, 0x0f, 0x45, 0xfb, 0x3d, 
+    0x55, 0xa5, 0x9b, 0x0b, 0xb4, 0xec, 0xea, 0x5d, 
+    0xb4, 0x35, 0x42, 0x3a, 0x43, 0xb0, 0x07, 0x4a, 
+    0x30, 0x2b, 0xba, 0x9d, 0xb6, 0x24, 0x52, 0xff, 
+    0x0f, 
 ];
 
-const BINARY_URL: &str = "https://github.com/deadrouter-ai/api-proxy-server/releases/latest/download/server";
-const SIGNATURE_URL: &str = "https://github.com/deadrouter-ai/api-proxy-server/releases/latest/download/server.sig";
+const BINARY_URL: &str = "https://github.com/deadrouter-ai/the-server/releases/latest/download/the_server";
+const SIGNATURE_URL: &str = "https://github.com/deadrouter-ai/the-server/releases/latest/download/the_server.sig";
+const HASH_URL: &str = "https://github.com/deadrouter-ai/the-server/releases/latest/download/the_server_hash.txt";
 
 // Binary lives on its own read-only tmpfs — isolated from all other writes.
 const PAYLOAD_DIR: &str = "/run/payload";
-const TARGET_PATH: &str = "/run/payload/server";
+const TARGET_PATH: &str = "/run/payload/the_server";
 
 const ATTESTATION_PORT: u16 = 8080;
 
@@ -136,21 +145,36 @@ async fn main() {
         .unwrap_or_else(|e| panic_shutdown(&format!("Failed to build HTTP client: {:?}", e)));
 
     let app_bytes = download_with_retry(&client, BINARY_URL, "production binary").await;
+    let expected_hash_bytes = download_with_retry(&client, HASH_URL, "server hash").await;
+    let expected_hash = String::from_utf8_lossy(&expected_hash_bytes).trim().to_string();
+
+
+    // ========================================================================
+    // STEP 3: COMPUTE HASH AND COMPARE
+    // ========================================================================
+    let mut ctx384 = Context::new(&SHA384);
+    ctx384.update(&app_bytes);
+    let runtime_hash = ctx384.finish();
+    let hash_hex = base16ct::lower::encode_string(runtime_hash.as_ref());
+    println!("[INIT] Payload SHA-384: {}", hash_hex);
+    
+    if hash_hex != expected_hash {
+        panic_shutdown(&format!("CRITICAL: Hash mismatch! Expected: {}, Computed: {}", expected_hash, hash_hex));
+    }
+    println!("[INIT] Server hash matches expected hash from the release.");
+
+    // ========================================================================
+    // STEP 4: CRYPTOGRAPHIC SIGNATURE VERIFICATION
+    // ========================================================================
     let sig_bytes = download_with_retry(&client, SIGNATURE_URL, "cryptographic signature").await;
 
     // Drop the HTTP client — no more network needed from the loader
     drop(client);
 
-    // ========================================================================
-    // STEP 3: CRYPTOGRAPHIC SIGNATURE VERIFICATION
-    // ========================================================================
-    println!("[INIT] Performing Ed25519 signature verification...");
-    let verifying_key = VerifyingKey::from_bytes(&PUBLIC_KEY_BYTES)
-        .unwrap_or_else(|e| panic_shutdown(&format!("Invalid hardcoded public key: {}", e)));
-    let signature = Signature::from_slice(&sig_bytes)
-        .unwrap_or_else(|e| panic_shutdown(&format!("Invalid signature format: {}", e)));
+    println!("[INIT] Performing ECDSA P-384 signature verification...");
+    let verifying_key = UnparsedPublicKey::new(&ECDSA_P384_SHA384_FIXED, &PUBLIC_KEY_BYTES);
 
-    if verifying_key.verify(&app_bytes, &signature).is_err() {
+    if verifying_key.verify(&app_bytes, &sig_bytes).is_err() {
         panic_shutdown(
             "CRITICAL: Signature verification FAILED!\n\
              Binary does NOT match the trusted signing key.\n\
@@ -158,15 +182,6 @@ async fn main() {
         );
     }
     println!("[INIT] Signature verification PASSED.");
-
-    // ========================================================================
-    // STEP 4: COMPUTE HASH
-    // ========================================================================
-    let mut ctx = Context::new(&SHA384);
-    ctx.update(&app_bytes);
-    let runtime_hash = ctx.finish();
-    let hash_hex = base16ct::lower::encode_string(runtime_hash.as_ref());
-    println!("[INIT] Payload SHA-384: {}", hash_hex);
 
     // ========================================================================
     // STEP 5: DEPLOY BINARY TO ISOLATED READ-ONLY TMPFS
@@ -192,7 +207,7 @@ async fn main() {
     // The server binary cannot modify itself (read-only mount) and cannot
     // execute anything it writes (noexec on all writable mounts).
     println!("[INIT] Spawning server as child process...");
-    let mut child = Command::new(TARGET_PATH)
+    let child = Command::new(TARGET_PATH)
         .env("ENV_PRODUCTION", "true")
         .env("LOADER_PAYLOAD_HASH", &hash_hex)
         .uid(65534)
