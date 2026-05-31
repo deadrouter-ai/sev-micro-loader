@@ -11,26 +11,33 @@ flowchart LR
     subgraph MEASURED["Measured by AMD Hardware (Immutable)"]
         LOADER["Micro-Loader Binary"]
         URL["Hardcoded URL:<br/>github.com/.../releases/latest"]
-        KEY["Hardcoded Ed25519 Public Key:<br/>0x1a15f398..."]
+        KEY["Hardcoded ECDSA P-384 Public Key:<br/>97-byte uncompressed point"]
         CA["Embedded TLS Root Certificates:<br/>Mozilla CA Store"]
     end
     subgraph RUNTIME["Downloaded at Runtime"]
         BIN["Server Binary"]
-        SIG["Detached Signature"]
+        HASH["SHA-384 Hash File"]
+        SIG["Detached ECDSA Signature"]
     end
     subgraph VERIFY["Verification Chain"]
         TLS["TLS validates GitHub identity"]
-        SIGCHECK["Ed25519 validates binary authenticity"]
-        HASH["SHA-384 hash recorded for attestation"]
+        HASHCHECK["SHA-384 hash validates integrity"]
+        SIGCHECK["ECDSA P-384 validates authenticity"]
+        RECORD["SHA-384 hash recorded for attestation"]
     end
     URL -->|HTTPS| BIN
+    URL -->|HTTPS| HASH
     URL -->|HTTPS| SIG
     CA --> TLS
     TLS --> BIN
+    BIN --> HASHCHECK
+    HASH --> HASHCHECK
+    HASHCHECK -->|"Match"| SIGCHECK
+    HASHCHECK -->|"Mismatch"| HALT0["PANIC SHUTDOWN"]
     KEY --> SIGCHECK
     SIG --> SIGCHECK
-    SIGCHECK -->|Pass| HASH
-    SIGCHECK -->|Fail| HALT["PANIC SHUTDOWN"]
+    SIGCHECK -->|"Valid"| RECORD
+    SIGCHECK -->|"Invalid"| HALT2["PANIC SHUTDOWN"]
 ```
 
 ---
@@ -42,8 +49,9 @@ flowchart LR
 **No.** The download URLs are **hardcoded in the source code** and compiled into the binary:
 
 ```rust
-const BINARY_URL: &str = "https://github.com/deadrouter-ai/api-proxy-server/releases/latest/download/server";
-const SIGNATURE_URL: &str = "https://github.com/deadrouter-ai/api-proxy-server/releases/latest/download/server.sig";
+const BINARY_URL: &str = "https://github.com/deadrouter-ai/the-server/releases/latest/download/the_server";
+const SIGNATURE_URL: &str = "https://github.com/deadrouter-ai/the-server/releases/latest/download/the_server.sig";
+const HASH_URL: &str = "https://github.com/deadrouter-ai/the-server/releases/latest/download/the_server_hash.txt";
 ```
 
 These URLs are part of the **measured binary**. Changing them would:
@@ -57,7 +65,7 @@ These URLs are part of the **measured binary**. Changing them would:
 
 **Technically possible, but immediately detectable.** Here's why this attack fails in practice:
 
-1. **The server source code is fully public.** The binary is built from `github.com/deadrouter-ai/api-proxy-server`, which is a public repository. Every line of code is visible. Every commit is traceable.
+1. **The server source code is fully public.** The binary is built from `github.com/deadrouter-ai/the-server`, which is a public repository. Every line of code is visible. Every commit is traceable.
 
 2. **The build pipeline is public GitHub Actions.** There are no secret build steps. Anyone can fork the repo, run the same pipeline, and verify they get the same binary.
 
@@ -65,7 +73,7 @@ These URLs are part of the **measured binary**. Changing them would:
 
 4. **Users can compile and compare.** Anyone suspicious can compile the server from source, compute its SHA-384 hash, and compare it against the hash reported by the attestation endpoint. If they differ, the backdoor is exposed.
 
-5. **The signing key provides accountability.** Only the owner can sign a release. A backdoored release is cryptographically traceable to the owner's signing key. This is a strong deterrent.
+5. **The signing key provides accountability.** Only the owner can sign a release with the ECDSA P-384 private key. A backdoored release is cryptographically traceable to the owner. This is a strong deterrent.
 
 **Verdict: ✅ Mitigated by transparency.** The owner can sign a malicious release, but it would be:
 - Built from public source code (auditable)
@@ -88,34 +96,37 @@ This makes the downloaded server **exactly as verifiable** as the loader itself 
 
 ### Question 3: Can GitHub serve a malicious binary?
 
-**No.** Even if GitHub (or a state-level attacker that has compromised GitHub) replaces the binary on the release page, the attack fails:
+**No.** Even if GitHub (or a state-level attacker that has compromised GitHub) replaces the binary on the release page, the attack fails through two independent defenses:
 
-1. **Ed25519 signature verification is independent of TLS.** The binary must carry a valid signature matching the hardcoded public key. GitHub does not have access to the owner's private Ed25519 signing key.
+1. **SHA-384 hash verification.** The loader downloads `the_server_hash.txt` from the release and independently computes the SHA-384 of the downloaded binary. If GitHub serves a different binary than what was hashed during the release, the hashes won't match and the VM shuts down immediately.
 
-2. **The public key is hardcoded in the measured binary.** It cannot be swapped out without changing the SEV-SNP measurement:
+2. **ECDSA P-384 signature verification is independent of TLS.** The binary must carry a valid ECDSA signature matching the hardcoded public key. GitHub does not have access to the owner's private ECDSA P-384 signing key.
+
+3. **The public key is hardcoded in the measured binary.** It cannot be swapped out without changing the SEV-SNP measurement:
    ```rust
-   const PUBLIC_KEY_BYTES: [u8; 32] = [
-       0x1a, 0x15, 0xf3, 0x98, 0x31, 0xd2, 0x7f, 0x93,
+   const PUBLIC_KEY_BYTES: [u8; 97] = [
+       0x04, 0xf0, 0x7c, 0x7f, 0x7c, 0xb0, 0x87, 0x82,
        // ... (hardcoded, immutable, measured by hardware)
    ];
    ```
 
-3. **On signature failure, the VM shuts down instantly.** There is no fallback, no retry with different code, no degraded mode. The system calls `reboot(RB_POWER_OFF)` to immediately cut all power. No code ever executes.
+4. **On signature failure, the VM shuts down instantly.** There is no fallback, no retry with different code, no degraded mode. The system calls `reboot(RB_POWER_OFF)` to immediately cut all power. No code ever executes.
 
-**Verdict: ✅ Not a vulnerability.** GitHub cannot forge the owner's signature.
+**Verdict: ✅ Not a vulnerability.** GitHub cannot forge the owner's ECDSA signature.
 
 ### Question 4: Can a state-level attacker compromise the TLS/CA system?
 
-**A compromised CA allows intercepting the download, but not bypassing signature verification.**
+**A compromised CA allows intercepting the download, but not bypassing hash or signature verification.**
 
 Attack scenario: A state actor compels a Certificate Authority to issue a fraudulent certificate for `github.com`, allowing them to MITM the HTTPS connection and serve a different binary.
 
-Defense: The Ed25519 signature is a **completely independent verification layer** that does not depend on TLS or the CA system. Even if the TLS layer is fully compromised:
+Defense: Both the SHA-384 hash check and the ECDSA P-384 signature are **completely independent verification layers** that do not depend on TLS or the CA system. Even if the TLS layer is fully compromised:
 - The attacker can serve a different binary ✅
-- The attacker **cannot** produce a valid Ed25519 signature ❌
-- The VM shuts down on the invalid signature ✅
+- The attacker **cannot** produce a matching SHA-384 hash file signed by the owner ❌
+- The attacker **cannot** produce a valid ECDSA P-384 signature ❌
+- The VM shuts down on hash mismatch or invalid signature ✅
 
-**Verdict: ✅ Defense in depth works.** TLS is the first layer; Ed25519 is the second, independent layer.
+**Verdict: ✅ Defense in depth works.** TLS is the first layer; SHA-384 hash and ECDSA P-384 are independent second and third layers.
 
 ### Question 5: What about the runtime filesystem after download?
 
@@ -139,13 +150,13 @@ After the binary is verified and written to disk, the loader performs a complete
 
 Including the server in the boot image would mean:
 - **Every server update changes the SEV-SNP measurement.** Users would need to re-verify after every update, which creates friction and reduces security (users stop checking).
-- **The boot image becomes large and hard to audit.** The server may be millions of lines of code. The loader is ~750 lines.
+- **The boot image becomes large and hard to audit.** The server may be millions of lines of code. The loader is ~950 lines.
 - **No separation of concerns.** The measured trust anchor should be small, stable, and auditable. The application logic should be independently updatable.
 
 With the current architecture:
 - The loader (trust anchor) is tiny, stable, and rarely changes
 - The server can be updated without changing the measurement
-- Updates still require the owner's cryptographic signature
+- Updates still require the owner's ECDSA P-384 signature
 - The small loader is easy for anyone to audit completely
 
 ### Question 7: What if a malicious binary somehow gets through all defenses?
@@ -175,9 +186,10 @@ Even in the theoretical worst case where every defense layer fails and a malicio
 
 ```mermaid
 flowchart TB
-    DOWNLOAD["Binary Downloaded<br/>from GitHub"]
+    DOWNLOAD["Binary + Hash + Signature<br/>Downloaded from GitHub"]
     TLS{"TLS 1.3 + PQ Crypto<br/>AES-256 + MLKEM768X25519"}
-    SIG{"Ed25519 Signature<br/>Hardcoded Public Key"}
+    HASH{"SHA-384 Hash Check<br/>Computed vs. Published"}
+    SIG{"ECDSA P-384 Signature<br/>Hardcoded Public Key (FIPS)"}
     WRITE["Write to /run/payload"]
     LOCK["Remount READ-ONLY"]
     NOEXEC["All writable mounts: NOEXEC"]
@@ -185,18 +197,22 @@ flowchart TB
     WATCH["Attestation Watchdog on port 8080<br/>Exposes payload SHA-384 continuously"]
 
     DOWNLOAD --> TLS
-    TLS -->|"Valid cert"| SIG
+    TLS -->|"Valid cert"| HASH
     TLS -->|"Invalid cert"| HALT1["Connection fails"]
+    HASH -->|"Match"| SIG
+    HASH -->|"Mismatch"| HALT2["PANIC SHUTDOWN"]
     SIG -->|"Valid signature"| WRITE
-    SIG -->|"Invalid signature"| HALT2["PANIC SHUTDOWN"]
+    SIG -->|"Invalid signature"| HALT3["PANIC SHUTDOWN"]
     WRITE --> LOCK --> NOEXEC --> RUN
     RUN --> WATCH
-    WATCH -->|"Server dies or watchdog fails"| HALT3["PANIC SHUTDOWN"]
+    WATCH -->|"Server dies or watchdog fails"| HALT4["PANIC SHUTDOWN"]
 
     style HALT1 fill:#e94560,color:#fff
     style HALT2 fill:#e94560,color:#fff
     style HALT3 fill:#e94560,color:#fff
+    style HALT4 fill:#e94560,color:#fff
     style TLS fill:#16213e,stroke:#0f3460,color:#eee
+    style HASH fill:#16213e,stroke:#0f3460,color:#eee
     style SIG fill:#16213e,stroke:#0f3460,color:#eee
     style LOCK fill:#0f3460,stroke:#e94560,color:#eee
     style NOEXEC fill:#0f3460,stroke:#e94560,color:#eee
@@ -206,7 +222,8 @@ flowchart TB
 | Layer | What It Stops | Independent? |
 |:---|:---|:---|
 | **TLS 1.3 + Post-Quantum KX** | Network interception, quantum attacks, protocol downgrade | Yes |
-| **Ed25519 signature** | Tampered binaries, compromised GitHub, rogue CAs | Yes |
+| **SHA-384 hash verification** | Corrupted downloads, CDN-level binary substitution | Yes |
+| **ECDSA P-384 signature (FIPS)** | Tampered binaries, compromised GitHub, rogue CAs | Yes |
 | **Hardcoded URLs** | Redirection to malicious servers | Yes |
 | **Public source code** | Hidden backdoors by the owner | Yes |
 | **Reproducible builds** | Discrepancies between source and binary | Yes |

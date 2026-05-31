@@ -78,4 +78,3 @@ $DOCKER run --rm --network host \
         cat sev_measurement.txt
         echo
     '
-echo "Build complete. Artifacts generated perfectly reproducibly."

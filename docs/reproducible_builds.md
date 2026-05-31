@@ -22,6 +22,17 @@ The build process runs inside a Docker container with **pinned, exact versions**
 | Kernel Source | 6.12.91 | Downloaded from `cdn.kernel.org` |
 | OVMF Firmware | 20250523-2.el10 | Downloaded from Rocky Linux, hash-verified |
 | Rust Dependencies | Locked | `Cargo.lock` ensures exact crate versions |
+| FIPS Crypto Module | aws-lc-rs 1.17 | Compiled from source with FIPS flag (requires Go + CMake) |
+
+## FIPS Build Requirements
+
+The loader uses `aws-lc-rs` with the `fips` feature enabled, which compiles the AWS-LC FIPS module from source inside the container. This requires additional build dependencies beyond a standard Rust project:
+
+- **Go compiler** — required by the AWS-LC FIPS build system (BoringSSL heritage)
+- **CMake** — drives the C/ASM compilation of the cryptographic module
+- **libclang / clang** — used by `bindgen` to generate Rust FFI bindings from C headers
+
+These are all installed automatically inside the Docker container and do not need to be present on the host system.
 
 ## Sources of Non-Reproducibility (And How We Eliminate Them)
 
@@ -65,6 +76,10 @@ export SOURCE_DATE_EPOCH=0
 ### 8. Kernel Compilation Cache (ccache)
 **Problem:** ccache speeds up compilation but could affect output.  
 **Solution:** ccache only caches preprocessor output. It does **not** affect the final compiled binary — it's an optimization-only tool. The same source + compiler always produces the same object code regardless of cache state.
+
+### 9. FIPS Module Compilation
+**Problem:** The aws-lc-rs FIPS module includes a C/ASM build step driven by CMake and Go, which could introduce non-determinism.  
+**Solution:** The Go compiler and CMake versions are pinned inside the Docker container. The FIPS module source is locked via `Cargo.lock`, ensuring the exact same C source is compiled every time.
 
 ## Verification Process
 

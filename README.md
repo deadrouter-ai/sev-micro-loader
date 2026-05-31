@@ -23,12 +23,13 @@ flowchart TB
         direction TB
         K["🐧 Hardened Linux Kernel"]
         ML["⚙️ Micro-Loader — PID 1"]
-        DL["📥 Downloads server binary from public GitHub"]
-        SIG["🔏 Verifies Ed25519 signature"]
+        DL["📥 Downloads server binary + hash from public GitHub"]
+        HASH["#️⃣ Verifies SHA-384 hash"]
+        SIG["🔏 Verifies ECDSA P-384 signature"]
         LOCK["🔐 Locks filesystem read-only"]
         SRV["🖥️ Runs verified server"]
         ATT["📋 Attestation Server on port 8080"]
-        K --> ML --> DL --> SIG --> LOCK --> SRV
+        K --> ML --> DL --> HASH --> SIG --> LOCK --> SRV
         ML --> ATT
     end
     USER["👤 Any User / Auditor"] -->|"1. Read open-source code"| ML
@@ -51,9 +52,10 @@ sequenceDiagram
     K->>ML: Start as PID 1
     ML->>ML: Mount filesystems and configure DNS
     ML->>GH: Download server binary via HTTPS
-    ML->>GH: Download detached signature
-    ML->>ML: Verify Ed25519 signature
-    Note over ML: HALT if signature fails
+    ML->>GH: Download SHA-384 hash + detached signature
+    ML->>ML: Verify SHA-384 hash matches
+    ML->>ML: Verify ECDSA P-384 signature (FIPS)
+    Note over ML: HALT if hash or signature fails
     ML->>ML: Write binary then remount READ-ONLY
     ML->>SRV: Spawn as child process
     ML->>ML: Start attestation server on port 8080
@@ -75,15 +77,16 @@ sequenceDiagram
 
 ## Why a Micro-Loader Instead of Just the Server?
 
-The VM does **not** contain the actual server software directly. Instead, it contains a tiny, auditable "loader" that fetches the real server at boot time from a public GitHub release. This is a deliberate security design with three layers of protection:
+The VM does **not** contain the actual server software directly. Instead, it contains a tiny, auditable "loader" that fetches the real server at boot time from a public GitHub release. This is a deliberate security design with multiple layers of protection:
 
 | Layer | What It Protects Against | How |
 |:---|:---|:---|
 | **Source is public** | Hidden backdoors | The server is built from a public open-source repo using GitHub Actions. Anyone can read the source and compile it themselves. |
 | **URL is hardcoded** | Redirection attacks | The download URL is compiled into the measured binary. The loader cannot download from anywhere else. Changing the URL changes the measurement. |
-| **Signature is required** | Tampered releases | Every binary must carry a valid Ed25519 signature. The public key is hardcoded. Even if GitHub is compromised, unsigned code is rejected. |
+| **Hash is verified** | Tampered releases | The loader downloads the official SHA-384 hash from the release, computes the hash locally, and compares them. A mismatch triggers immediate shutdown. |
+| **Signature is required** | Tampered releases, compromised CDN | Every binary must carry a valid ECDSA P-384 signature. The public key is hardcoded. Even if GitHub is compromised, unsigned code is rejected. |
 
-> The loader is ~750 lines of Rust — small enough to audit completely in an afternoon.
+> The loader is ~950 lines of Rust — small enough to audit completely in an afternoon.
 
 ## Threat Model Summary
 
@@ -93,7 +96,7 @@ The VM does **not** contain the actual server software directly. Instead, it con
 | **Provider modifies boot code** | Provider | AMD Secure Processor measures kernel+initramfs. Any change alters the measurement |
 | **DNS hijacking** | Provider/Network | DNS resolvers hardcoded (Quad9 + Cloudflare). DHCP DNS ignored |
 | **TLS interception** | Provider/State | TLS 1.3 only, AES-256-GCM only, post-quantum X25519MLKEM768 key exchange. Embedded CA store |
-| **GitHub serves malicious binary** | GitHub/State | Downloaded binary requires valid Ed25519 signature. Only owner holds private key |
+| **GitHub serves malicious binary** | GitHub/State | Downloaded binary requires valid ECDSA P-384 signature (FIPS). Only owner holds private key |
 | **Owner pushes backdoor** | Owner | Server source is public. Attestation server exposes payload SHA-384 for independent verification |
 | **Server exploit** | Attacker | Binary on READ-ONLY mount. Writable dirs are NOEXEC. No shell or SSH exists |
 | **Malicious code interferes** | Any | Any anomaly (server death, attestation failure) triggers **immediate VM power-off** |

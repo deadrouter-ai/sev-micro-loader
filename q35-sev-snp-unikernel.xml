@@ -1,69 +1,132 @@
-<domain type='kvm'>
-  <name>rust-unikernel-node</name>
-  <vcpu placement='static'>2</vcpu>
-  
-  <memory unit='GiB'>2</memory>
-  <currentMemory unit='GiB'>4</currentMemory>
+<domain type="kvm">
+  <name><uuid></name>
+  <uuid><_uuid></uuid>
+
+  <memory unit="GiB">4</memory>
+  <currentMemory unit="GiB">4</currentMemory>
   <memoryBacking>
-    <!-- Essential for SEV-SNP: memory cannot be swapped to disk -->
-    <locked/> 
+    <hugepages>
+      <page size="1" unit="GiB"/>
+    </hugepages>
+    <locked/>
   </memoryBacking>
-  
+
+  <vcpu placement="static" current="2">2</vcpu>
+  <cpu mode="host-passthrough">
+    <cache mode="passthrough"/>
+    <topology sockets="1" cores="2" threads="1"/>
+    <feature policy="require" name="topoext"/>
+    <feature policy="disable" name="svm"/>
+  </cpu>
+
+  <cputune>
+    <shares>4096</shares>
+  </cputune>
+
   <os>
-    <type arch='x86_64' machine='q35'>hvm</type>
-    <loader readonly='yes' type='pflash'>/usr/share/edk2/ovmf/OVMF.amdsev.fd</loader>
-    
+    <type machine="q35">hvm</type>
+    <loader readonly="yes" type="pflash">/usr/share/edk2/ovmf/OVMF.amdsev.fd</loader>
     <kernel>/var/lib/libvirt/images/custom_tenant/bzImage</kernel>
     <initrd>/var/lib/libvirt/images/custom_tenant/zero_trust_os.cpio</initrd>
     <cmdline>console=ttyS0 ip=dhcp quiet loglevel=0 random.trust_cpu=on random.trust_bootloader=off amd_iommu=force_isolation iommu.strict=1 iommu.passthrough=0 mitigations=auto,nosmt spectre_v2=on pti=on gather_data_sampling=force srso=safe-ret retbleed=auto,nosmt lockdown=confidentiality</cmdline>
   </os>
 
-  <cpu mode='custom' match='exact'>
-    <model fallback='forbid'>EPYC-v3</model>
-    <!-- Explicitly enforce 1 thread per core to mitigate cross-thread hardware side-channels -->
-    <topology sockets='1' dies='1' cores='2' threads='1'/>
-  </cpu>
+  <clock offset="utc">
+    <timer name="rtc" tickpolicy="catchup"/>
+  </clock>
 
   <devices>
     <emulator>/usr/bin/qemu-system-x86_64</emulator>
-    
-    <!-- Network with required IOMMU for SEV-SNP DMA bounce buffers -->
-    <interface type='network'>
-      <source network='default'/>
-      <model type='virtio'/>
-      <driver name='vhost' iommu='on'/> 
-    </interface>
-    
-    <console type='pty'>
-      <target type='serial' port='0'/>
+
+    <console type="pty">
+      <target type="serial" port="0"/>
     </console>
 
-    <!-- Attack Surface Reduction -->
-    <!-- Disable memory ballooning -->
-    <memballoon model='none'/>
-    <!-- Disable all unneeded virtual peripherals to close QEMU breakout vectors -->
-    <video><model type='none'/></video>
-    <sound model='none'/>
-    <controller type='usb' model='none'/>
-    <input type='keyboard' bus='usb' model='none'/>
-    <input type='mouse' bus='usb' model='none'/>
-    <input type='tablet' bus='usb' model='none'/>
-    <smartcard mode='none'/>
-    <watchdog model='none'/>
+    <memballoon model="none"/>
+
+    <video><model type="none"/></video>
+
+    <controller type="scsi" model="virtio-scsi">
+      <driver iommu="on"/>
+    </controller>
+    <controller type="scsi" index="1" model="virtio-scsi">
+      <driver iothread="1" iommu="on"/>
+    </controller>
+
+    <disk type="file" device="disk">
+      <driver name="qemu" type="qcow2" io="threads" cache="none" discard="unmap"/>
+      <source file="/home/vf-data/disk/<uuid>_1.img"/>
+      <target dev="sda" bus="scsi"/>
+      <address type="drive" controller="1" bus="0" target="0" unit="0"/>
+      <iotune>
+        <read_iops_sec>100000</read_iops_sec>
+        <write_iops_sec>100000</write_iops_sec>
+        <read_bytes_sec>1073741824</read_bytes_sec>
+        <write_bytes_sec>1073741824</write_bytes_sec>
+      </iotune>
+    </disk>
+
+    <interface type="bridge">
+      <model type="virtio"/>
+      <driver queues="2" iommu="on"/>
+      <source bridge="viifbrXX"/>
+      <target dev="xxxxxxx"/>
+      <mac address="xx:xx:xx:xx:xx:xx"/>
+      <filterref filter="vf-server-xxxxxxxxxx">
+        <parameter name="IP" value="151.242.242.xxx"/>
+        <parameter name="IP_MASK" value="32"/>
+        <parameter name="IPV6" value="2803:29e0:13:xxxx::"/>
+        <parameter name="IPV6_MASK" value="64"/>
+      </filterref>
+      <port isolated="no"/>
+      <bandwidth>
+        <inbound average="125000"/>
+        <outbound average="125000"/>
+      </bandwidth>
+    </interface>
+
+    <sound model="none"/>
+    <controller type="usb" model="none"/>
+    <input type="keyboard" bus="usb" model="none"/>
+    <input type="mouse" bus="usb" model="none"/>
+    <input type="tablet" bus="usb" model="none"/>
+    <smartcard mode="none"/>
+    <watchdog model="none"/>
+
+    <controller type="pci" model="pcie-root"/>
+    <controller type="pci" model="pcie-root-port"/>
+    <controller type="pci" model="pcie-root-port"/>
+    <controller type="pci" model="pcie-root-port"/>
+    <controller type="pci" model="pcie-root-port"/>
+    <controller type="pci" model="pcie-root-port"/>
+    <controller type="pci" model="pcie-root-port"/>
+    <controller type="pci" model="pcie-root-port"/>
+    <controller type="pci" model="pcie-root-port"/>
+    <controller type="pci" model="pcie-root-port"/>
+    <controller type="pci" model="pcie-root-port"/>
+    <controller type="pci" model="pcie-to-pci-bridge"/>
   </devices>
 
-  <!-- AMD SEV-SNP Hardware Configuration -->
-  <launchSecurity type='sev-snp'>
-    <cbitpos>47</cbitpos> 
+  <features>
+    <apic/>
+    <acpi/>
+    <pae/>
+  </features>
+
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>destroy</on_reboot>
+  <on_crash>destroy</on_crash>
+  <iothreads>2</iothreads>
+
+  <launchSecurity type="sev-snp" kernelHashes="yes">
+    <cbitpos>51</cbitpos>
     <reducedPhysBits>1</reducedPhysBits>
     <!-- 
       Policy 0x30000: 
       Bit 16 (0x10000) = SMT allowed (Many host providers require this to boot)
       Bit 17 (0x20000) = Migration agent allowed
-      *Note: If provider allows it, changing this to 0x20000.*
+      *Note: If provider allows it, change this to 0x20000.*
     -->
     <policy>0x30000</policy> 
-    <!-- Enforce hardware measurement of the kernel, initrd, and cmdline -->
-    <kernelHashes>yes</kernelHashes>
   </launchSecurity>
 </domain>

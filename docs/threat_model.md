@@ -10,7 +10,7 @@ flowchart TB
         AMD["AMD Secure Processor<br/><i>Hardware root of trust</i>"]
         KERNEL["Hardened Linux Kernel<br/><i>Measured at boot</i>"]
         LOADER["Micro-Loader Binary<br/><i>Measured at boot</i>"]
-        SERVER["Server Binary<br/><i>Signature-verified, immutable</i>"]
+        SERVER["Server Binary<br/><i>Hash-verified + Signature-verified, immutable</i>"]
     end
     subgraph UNTRUSTED["❌ Untrusted (Everything Else)"]
         CLOUD["Cloud Provider<br/>Hypervisor, Host OS, Staff"]
@@ -21,7 +21,7 @@ flowchart TB
     end
     AMD -.->|"Measures"| KERNEL
     AMD -.->|"Measures"| LOADER
-    LOADER -.->|"Verifies signature"| SERVER
+    LOADER -.->|"Verifies hash + signature"| SERVER
     CLOUD -->|"Cannot read/modify"| TRUSTED
     NET -->|"Cannot intercept"| TRUSTED
     OWNER -->|"Cannot inject unsigned code"| TRUSTED
@@ -51,7 +51,7 @@ Any entity that can observe or manipulate traffic between the VM and the interne
 |:---|:---|:---|:---|
 | **DNS spoofing** | Redirect `github.com` to attacker-controlled server | Hardcoded DNS resolvers (Quad9 + Cloudflare) via trusted public infrastructure. DHCP DNS ignored. | ✅ Mitigated |
 | **TLS interception** | Present a fraudulent TLS certificate for github.com | Embedded Mozilla CA root store. Provider cannot add rogue CAs. Connection fails if cert doesn't chain to a real CA. | ✅ Mitigated |
-| **Binary substitution** | Replace the downloaded server binary in transit | Even if an attacker somehow broke TLS, the binary must carry a valid **Ed25519 signature** matching the hardcoded public key. An unsigned or wrongly-signed binary causes **immediate VM shutdown** (power-off). | ✅ Mitigated |
+| **Binary substitution** | Replace the downloaded server binary in transit | Even if an attacker somehow broke TLS, two independent checks protect the binary: (1) **SHA-384 hash verification** against the published hash file, and (2) **ECDSA P-384 signature verification** against the hardcoded public key. Both must pass or the VM shuts down immediately. | ✅ Mitigated |
 | **Network blackholing** | Block all network traffic to prevent booting | The loader retries downloads with configurable backoff (5 attempts, 3s delay). Persistent network failure triggers **immediate shutdown** (power-off). This is a denial-of-service but not a confidentiality/integrity breach. | ⚠️ DoS only |
 
 ### 3. Malicious Project Owner
@@ -62,7 +62,7 @@ The person who controls the signing key and the source code repository. This is 
 |:---|:---|:---|:---|
 | **Push backdoored server** | Owner publishes a malicious update to the server repo | The server repository is **fully public and open source**. Every commit is visible. The build pipeline runs on **public GitHub Actions** with no secret build steps. The community can audit every change before trusting it. | ✅ Mitigated by transparency |
 | **Push backdoored loader** | Owner modifies the micro-loader to bypass protections | The loader is **measured by AMD hardware**. Any change to the loader changes the SEV-SNP measurement. Users who previously verified the measurement will immediately detect the change. The loader source is also public and auditable. | ✅ Mitigated by measurement |
-| **Sign malicious binary** | Owner signs a backdoored release with their private key | The source code is public. Users can compare the released binary against what they compile from the public source. If the binary doesn't match the source, the backdoor is exposed. Additionally, the owner cannot selectively target users — a malicious release affects everyone equally and is publicly visible. | ✅ Mitigated by reproducible builds |
+| **Sign malicious binary** | Owner signs a backdoored release with their ECDSA P-384 private key | The source code is public. Users can compare the released binary against what they compile from the public source. If the binary doesn't match the source, the backdoor is exposed. Additionally, the owner cannot selectively target users — a malicious release affects everyone equally and is publicly visible. | ✅ Mitigated by reproducible builds |
 | **Change hardcoded URLs** | Owner points the loader to a private server | Changing any hardcoded value changes the binary, which changes the CPIO, which changes the SEV-SNP measurement. Users would detect this immediately. | ✅ Mitigated by measurement |
 
 ### 4. Compromised GitHub / State-Level Attack
@@ -71,9 +71,9 @@ A nation-state or advanced adversary that has compromised GitHub's infrastructur
 
 | Attack Vector | Description | Mitigation | Status |
 |:---|:---|:---|:---|
-| **Serve modified release binary** | GitHub serves a different binary than what was built | The binary must pass **Ed25519 signature verification**. The signing key is held exclusively by the owner, not by GitHub. GitHub cannot produce a valid signature. The VM powers off on invalid signatures. | ✅ Mitigated |
+| **Serve modified release binary** | GitHub serves a different binary than what was built | The binary must pass both **SHA-384 hash verification** and **ECDSA P-384 signature verification**. The signing key is held exclusively by the owner, not by GitHub. GitHub cannot produce a valid signature. The VM powers off on any verification failure. | ✅ Mitigated |
 | **Modify source code on GitHub** | Alter the visible source code to hide a backdoor | Users verify via **reproducible builds**. They compile the source locally and compare the measurement against the live attestation. If GitHub modified the source, the locally-compiled measurement won't match the attestation, exposing the tampering. | ✅ Mitigated |
-| **Compromise the CA system** | Issue a fraudulent TLS certificate for github.com | Even if TLS is broken, the **Ed25519 signature verification** is a completely independent layer. A rogue TLS cert allows downloading a binary, but not faking the signature. | ✅ Mitigated |
+| **Compromise the CA system** | Issue a fraudulent TLS certificate for github.com | Even if TLS is broken, the **SHA-384 hash check** and **ECDSA P-384 signature verification** are completely independent layers. A rogue TLS cert allows downloading a binary, but not faking the hash or signature. | ✅ Mitigated |
 | **Backdoor the Rust compiler** | Supply-chain attack via compromised `rustc` | The Docker build environment uses a **pinned** Ubuntu base image (locked by SHA-256 digest), a specific Rust version (1.95.0), and specific GCC version (11.4.0). Users can verify the toolchain integrity independently. The build is deterministic — any toolchain modification produces different hashes. | ⚠️ Partially mitigated |
 
 ### 5. Runtime Exploitation
@@ -104,4 +104,4 @@ Datacenter staff or anyone with physical access to the server hardware.
 | **Denial of service** | The cloud provider can shut down, throttle, or network-isolate the VM. SEV-SNP protects confidentiality and integrity, not availability. |
 | **Side-channel attacks** | Some CPU side-channel attacks (e.g., spectre variants) may leak information across VM boundaries. AMD has mitigations but this is an evolving research area. |
 | **AMD hardware backdoor** | If AMD's silicon contains an undisclosed backdoor, the entire trust model fails. This is the fundamental trust assumption of the architecture. |
-| **Bugs in this code** | Software bugs in the loader or kernel could theoretically be exploited. The loader is small (~750 lines) to minimize this risk, and the kernel is compiled with KSPP hardening options. |
+| **Bugs in this code** | Software bugs in the loader or kernel could theoretically be exploited. The loader is small (~950 lines) to minimize this risk, and the kernel is compiled with KSPP hardening options. |

@@ -24,12 +24,24 @@ flowchart TB
         subgraph RUNTIME["Runtime Mounts"]
             RUN["/run — NOEXEC"]
             PAYLOAD["/run/payload — READ-ONLY after write"]
-            SERVER["server binary — immutable"]
+            SERVER["the_server binary — immutable"]
         end
         KERNEL --> INITRAMFS
         INITRAMFS --> RUNTIME
     end
 ```
+
+## Cryptographic Stack
+
+All cryptographic operations use **aws-lc-rs** compiled in **FIPS mode**, backed by AWS-LC (a fork of BoringSSL with a FIPS 140-3 validated module):
+
+| Operation | Algorithm | Library |
+|:---|:---|:---|
+| Signature Verification | ECDSA P-384 with SHA-384 | aws-lc-rs (FIPS) |
+| Payload Hashing | SHA-384 | aws-lc-rs (FIPS) |
+| Attestation Report Data | SHA-512 | aws-lc-rs (FIPS) |
+| TLS Transport | TLS 1.3 with AES-256-GCM | rustls + aws-lc-rs |
+| Key Exchange | X25519MLKEM768 (post-quantum hybrid) | aws-lc-rs |
 
 ## Boot Process (Step by Step)
 
@@ -49,23 +61,18 @@ The kernel starts the micro-loader as PID 1 directly from the initramfs. The loa
 - Mounts `/tmp` with `NOEXEC` flag (nothing written there can be executed)
 - Mounts `/run` with `NOEXEC` flag
 - Creates `/run/payload` as a dedicated tmpfs for the server binary
-
-### Step 3: Network & DNS Initialization
-
-The loader manually brings up network interfaces and configures DNS:
-- **Loopback** (`lo`) is configured via raw socket ioctls
-- **Ethernet interfaces** are brought UP if not already
-- **DNS resolvers** are hardcoded to Quad9 (`9.9.9.9`) and Cloudflare (`1.1.1.1`)
+- Configures network interfaces and hardcoded DNS (Quad9 `9.9.9.9` + Cloudflare `1.1.1.1`)
 
 > **Critical:** DHCP-provided DNS is deliberately ignored. The cloud provider cannot redirect DNS queries to a malicious resolver.
 
-### Step 4: Secure Payload Fetching
+### Step 3: Secure Payload Fetching
 
-The loader downloads the production server binary and its detached Ed25519 signature from **hardcoded URLs** pointing to a public GitHub release:
+The loader downloads three files from **hardcoded URLs** pointing to a public GitHub release:
 
 ```
-https://github.com/deadrouter-ai/api-proxy-server/releases/latest/download/server
-https://github.com/deadrouter-ai/api-proxy-server/releases/latest/download/server.sig
+https://github.com/deadrouter-ai/the-server/releases/latest/download/the_server
+https://github.com/deadrouter-ai/the-server/releases/latest/download/the_server_hash.txt
+https://github.com/deadrouter-ai/the-server/releases/latest/download/the_server.sig
 ```
 
 TLS is configured with **maximum security hardening**:
@@ -76,20 +83,35 @@ TLS is configured with **maximum security hardening**:
 
 This makes TLS man-in-the-middle attacks impossible without breaking the TLS connection entirely.
 
-### Step 5: Cryptographic Verification
+### Step 4: SHA-384 Hash Verification
 
-The downloaded binary is verified against a **hardcoded Ed25519 public key**:
+Before any code executes, the loader performs an integrity check:
+
+1. Downloads `the_server_hash.txt` from the release (the expected SHA-384 hash)
+2. Computes the SHA-384 hash of the downloaded binary locally
+3. Compares them in constant-time
+
+```
+If hashes DO NOT MATCH → PANIC SHUTDOWN. Immediate power-off.
+If hashes MATCH         → Proceed to signature verification.
+```
+
+This catches corrupted downloads, CDN tampering, and partial file transfers before the more expensive signature verification step.
+
+### Step 5: ECDSA P-384 Signature Verification
+
+The downloaded binary is verified against a **hardcoded ECDSA P-384 public key** using the FIPS-validated aws-lc-rs library:
 
 ```
 If signature is INVALID → PANIC SHUTDOWN. Immediate power-off. No code executes. Ever.
-If signature is VALID   → Binary is accepted and its SHA-384 hash is computed.
+If signature is VALID   → Binary is accepted for execution.
 ```
 
-This ensures that even if the download URL were somehow redirected (which is impossible because it's hardcoded), the attacker would need the owner's private signing key to produce a valid signature.
+The public key is a 97-byte uncompressed point on the NIST P-384 curve, compiled directly into the measured binary. This ensures that even if the download URL were somehow redirected (which is impossible because it's hardcoded), the attacker would need the owner's private signing key to produce a valid signature.
 
 ### Step 6: Filesystem Lockdown
 
-After writing the verified binary to `/run/payload/server`:
+After writing the verified binary to `/run/payload/the_server`:
 
 1. `/run/payload` is **remounted as READ-ONLY** — the binary becomes immutable
 2. `/tmp` is mounted with **NOEXEC** — nothing written there can execute

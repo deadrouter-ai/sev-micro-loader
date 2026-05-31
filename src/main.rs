@@ -4,11 +4,16 @@ use std::path::Path;
 use std::process::Command;
 use std::os::unix::process::CommandExt;
 use std::sync::Arc;
-use aws_lc_rs::digest::{Context, SHA256, SHA384, SHA512};
+use aws_lc_rs::digest::{Context, SHA384, SHA512};
 use aws_lc_rs::signature::{UnparsedPublicKey, ECDSA_P384_SHA384_FIXED};
 use nix::mount::{mount, MsFlags};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 // ============================================================================
 // HARDCODED CRITICAL TRUST ANCHORS
@@ -207,13 +212,29 @@ async fn main() {
     // The server binary cannot modify itself (read-only mount) and cannot
     // execute anything it writes (noexec on all writable mounts).
     println!("[INIT] Spawning server as child process...");
-    let child = Command::new(TARGET_PATH)
-        .env("ENV_PRODUCTION", "true")
-        .env("LOADER_PAYLOAD_HASH", &hash_hex)
-        .uid(65534)
-        .gid(65534)
-        .spawn()
-        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to spawn server: {}", e)));
+
+    // A pre-exec closure that locks down the child process's memory.
+    // It runs after fork but before exec. Errors are ignored to ensure it never crashes.
+    fn secure_memory_setup() -> std::io::Result<()> {
+        unsafe {
+            // 1. Lock memory into RAM to prevent swapping.
+            libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
+            // 2. Disable ptrace and core dumps to protect RAM from other processes.
+            libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+        }
+        Ok(())
+    }
+
+    let child = unsafe {
+        Command::new(TARGET_PATH)
+            .env("ENV_PRODUCTION", "true")
+            .env("LOADER_PAYLOAD_HASH", &hash_hex)
+            .uid(65534)
+            .gid(65534)
+            .pre_exec(secure_memory_setup)
+            .spawn()
+            .unwrap_or_else(|e| panic_shutdown(&format!("Failed to spawn server: {}", e)))
+    };
 
     let child_pid = child.id();
     println!("[INIT] Server launched as PID {}.", child_pid);
@@ -230,13 +251,16 @@ async fn main() {
     }
 
     let current_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/init"));
-    let attest_child = Command::new(current_exe)
-        .arg("run-attestation-server")
-        .arg(&hash_hex)
-        .uid(65534)
-        .gid(65534)
-        .spawn()
-        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to spawn attestation server: {}", e)));
+    let attest_child = unsafe {
+        Command::new(current_exe)
+            .arg("run-attestation-server")
+            .arg(&hash_hex)
+            .uid(65534)
+            .gid(65534)
+            .pre_exec(secure_memory_setup)
+            .spawn()
+            .unwrap_or_else(|e| panic_shutdown(&format!("Failed to spawn attestation server: {}", e)))
+    };
 
     let attest_pid = attest_child.id();
     println!("[INIT] Attestation server spawned as isolated PID {}.", attest_pid);
