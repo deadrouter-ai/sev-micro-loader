@@ -231,7 +231,7 @@ async fn main() {
 
     let child = unsafe {
         Command::new(TARGET_PATH)
-            .env("ENV_PRODUCTION", "true")
+            .env("DEVELOPMENT", "false")
             .env("LOADER_PAYLOAD_HASH", &hash_hex)
             .uid(65534)
             .gid(65534)
