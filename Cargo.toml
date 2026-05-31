@@ -10,7 +10,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 mimalloc = { version = "*", features = ["secure"] }
 
 # Embedded TLS root certificates (Mozilla CA store baked into the binary)
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "fips"] }
 webpki-roots = "1.0"
 
 # Cryptography and Hashing (FIPS validated)

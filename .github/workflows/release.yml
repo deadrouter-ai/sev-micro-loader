@@ -106,12 +106,6 @@ jobs:
           When the script finishes, it prints the **Final SEV-SNP Measurement**. If it matches the value in the table above, the release is authentic and unmodified.
 
           > **Why Docker?** Different compiler versions produce different binaries. The Docker container ensures everyone uses the exact same toolchain, so the output is identical regardless of your host OS.
-
-          ## Security Model
-
-          - All download URLs and the Ed25519 signing key are **hardcoded** in the measured binary
-          - The server source code is **fully public** — [view it here](https://github.com/deadrouter-ai/api-proxy-server)
-          - Full documentation: [Threat Model](https://github.com/deadrouter-ai/sev-micro-loader/blob/main/docs/threat_model.md) · [Loader Security Audit](https://github.com/deadrouter-ai/sev-micro-loader/blob/main/docs/loader_security.md) · [Architecture](https://github.com/deadrouter-ai/sev-micro-loader/blob/main/docs/architecture.md)
           ENDOFNOTES
 
       - name: Attest Build Provenance

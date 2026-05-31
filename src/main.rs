@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process::Command;
 use std::os::unix::process::CommandExt;
 use std::sync::Arc;
+use std::net::IpAddr;
 use aws_lc_rs::digest::{Context, SHA384, SHA512};
 use aws_lc_rs::signature::{UnparsedPublicKey, ECDSA_P384_SHA384_FIXED};
 use nix::mount::{mount, MsFlags};
@@ -15,9 +16,9 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-// ============================================================================
+// ======================================================================
 // HARDCODED CRITICAL TRUST ANCHORS
-// ============================================================================
+// ======================================================================
 const PUBLIC_KEY_BYTES: [u8; 97] = [
     0x04, 0xf0, 0x7c, 0x7f, 0x7c, 0xb0, 0x87, 0x82, 
     0x38, 0x1d, 0x72, 0x91, 0xf0, 0xcc, 0xc2, 0xcd, 
@@ -51,9 +52,9 @@ const REQUEST_TIMEOUT_SECS: u64 = 120;
 const NETWORK_SETTLE_SECS: u64 = 5;
 const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 
-// ============================================================================
+// ======================================================================
 // SEV-SNP ioctl constants (Linux UAPI: include/uapi/linux/sev-guest.h)
-// ============================================================================
+// ======================================================================
 // SNP_GET_REPORT = _IOWR('S', 0x0, struct snp_guest_request_ioctl)
 // struct is 32 bytes → ioctl nr = (3<<30)|(32<<16)|('S'<<8)|0 = 0xC0205300
 const SNP_GET_REPORT: libc::c_ulong = 0xC020_5300;
@@ -97,9 +98,9 @@ async fn main() {
 
     println!("[INIT] Confidential Micro-Loader starting (PID 1)...");
 
-    // ========================================================================
+    // ======================================================================
     // STEP 1: PREPARE OS ENVIRONMENT (mount, network, DNS)
-    // ========================================================================
+    // ======================================================================
     prepare_system_env();
 
     // Give kernel DHCP config time to complete, then verify connectivity.
@@ -108,9 +109,9 @@ async fn main() {
     tokio::time::sleep(tokio::time::Duration::from_secs(NETWORK_SETTLE_SECS)).await;
     check_network_ready();
 
-    // ========================================================================
+    // ======================================================================
     // STEP 2: DOWNLOAD BINARY AND SIGNATURE
-    // ========================================================================
+    // ======================================================================
     println!("[INIT] Downloading production payload and detached signature...");
 
     // Build TLS config with MAXIMUM SECURITY:
@@ -122,12 +123,15 @@ async fn main() {
     // store directly into the binary so TLS works without any system files.
     let hardened_provider = rustls::crypto::CryptoProvider {
         cipher_suites: vec![
-            // AES-256-GCM only — no AES-128, no ChaCha20
             rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384,
         ],
         kx_groups: vec![
+            rustls::crypto::aws_lc_rs::kx_group::SECP256R1MLKEM768,
             rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768,
-            rustls::crypto::aws_lc_rs::kx_group::X25519,
+            rustls::crypto::aws_lc_rs::kx_group::MLKEM1024,
+            rustls::crypto::aws_lc_rs::kx_group::MLKEM768,
+            rustls::crypto::aws_lc_rs::kx_group::SECP384R1,
+            rustls::crypto::aws_lc_rs::kx_group::SECP256R1,
         ],
         ..rustls::crypto::aws_lc_rs::default_provider()
     };
@@ -154,9 +158,9 @@ async fn main() {
     let expected_hash = String::from_utf8_lossy(&expected_hash_bytes).trim().to_string();
 
 
-    // ========================================================================
+    // ======================================================================
     // STEP 3: COMPUTE HASH AND COMPARE
-    // ========================================================================
+    // ======================================================================
     let mut ctx384 = Context::new(&SHA384);
     ctx384.update(&app_bytes);
     let runtime_hash = ctx384.finish();
@@ -168,9 +172,9 @@ async fn main() {
     }
     println!("[INIT] Server hash matches expected hash from the release.");
 
-    // ========================================================================
+    // ======================================================================
     // STEP 4: CRYPTOGRAPHIC SIGNATURE VERIFICATION
-    // ========================================================================
+    // ======================================================================
     let sig_bytes = download_with_retry(&client, SIGNATURE_URL, "cryptographic signature").await;
 
     // Drop the HTTP client — no more network needed from the loader
@@ -188,9 +192,9 @@ async fn main() {
     }
     println!("[INIT] Signature verification PASSED.");
 
-    // ========================================================================
+    // ======================================================================
     // STEP 5: DEPLOY BINARY TO ISOLATED READ-ONLY TMPFS
-    // ========================================================================
+    // ======================================================================
     println!("[INIT] Writing verified binary to isolated volatile storage...");
     std::fs::write(TARGET_PATH, &app_bytes)
         .unwrap_or_else(|e| panic_shutdown(&format!("Failed to write binary: {}", e)));
@@ -199,14 +203,14 @@ async fn main() {
     std::fs::set_permissions(TARGET_PATH, Permissions::from_mode(0o555))
         .unwrap_or_else(|e| panic_shutdown(&format!("Failed to chmod binary: {}", e)));
 
-    // ========================================================================
+    // ======================================================================
     // STEP 6: LOCK DOWN FILESYSTEM — MAKE BINARY IMMUTABLE
-    // ========================================================================
+    // ======================================================================
     lockdown_filesystem();
 
-    // ========================================================================
+    // ======================================================================
     // STEP 7: SPAWN SERVER AS CHILD PROCESS (PID 1 stays as loader)
-    // ========================================================================
+    // ======================================================================
     // We do NOT execve. Instead, we spawn the server as a child process so
     // PID 1 (this code) remains our trusted, measured attestation server.
     // The server binary cannot modify itself (read-only mount) and cannot
@@ -239,9 +243,9 @@ async fn main() {
     let child_pid = child.id();
     println!("[INIT] Server launched as PID {}.", child_pid);
 
-    // ========================================================================
+    // ======================================================================
     // STEP 8: RUN INDEPENDENT ATTESTATION SERVER (Isolated Child Process)
-    // ========================================================================
+    // ======================================================================
     // Running a TCP server in PID 1 is dangerous. Instead, we spawn it as a 
     // separate, unprivileged child process. PID 1 simply acts as a watchdog.
     
@@ -286,9 +290,9 @@ async fn main() {
     }
 }
 
-// ============================================================================
+// ======================================================================
 // SYSTEM ENVIRONMENT PREPARATION
-// ============================================================================
+// ======================================================================
 fn prepare_system_env() {
     println!("[INIT] Mounting essential filesystems...");
     let nosuid_nodev_noexec = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC;
@@ -354,9 +358,9 @@ fn prepare_system_env() {
     println!("[INIT] Filesystem environment ready.");
 }
 
-// ============================================================================
+// ======================================================================
 // RUNTIME KERNEL HARDENING
-// ============================================================================
+// ======================================================================
 fn apply_kernel_hardening() {
     println!("[INIT] Applying runtime kernel hardening via sysfs...");
 
@@ -434,9 +438,9 @@ fn apply_kernel_hardening() {
     }
 }
 
-// ============================================================================
+// ======================================================================
 // NETWORK INTERFACE INITIALIZATION
-// ============================================================================
+// ======================================================================
 fn init_networking() {
     println!("[INIT] Initializing network interfaces...");
 
@@ -594,9 +598,9 @@ fn check_network_ready() {
     }
 }
 
-// ============================================================================
+// ======================================================================
 // FILESYSTEM LOCKDOWN — CALLED AFTER BINARY IS WRITTEN
-// ============================================================================
+// ======================================================================
 /// Makes the server binary immutable and ensures no writable+executable
 /// filesystems exist. After this call:
 ///   - /run/payload is READ-ONLY (binary cannot be modified or replaced)
@@ -621,9 +625,9 @@ fn lockdown_filesystem() {
     println!("[INIT]   No writable+executable filesystem exists.");
 }
 
-// ============================================================================
+// ======================================================================
 // DOWNLOAD WITH RETRY & VALIDATION
-// ============================================================================
+// ======================================================================
 async fn download_with_retry(client: &reqwest::Client, url: &str, desc: &str) -> Vec<u8> {
     let mut last_error = String::new();
 
@@ -667,9 +671,119 @@ async fn download_with_retry(client: &reqwest::Client, url: &str, desc: &str) ->
     panic_shutdown(&format!("Failed to download {} after {} attempts: {}", desc, MAX_DOWNLOAD_RETRIES, last_error))
 }
 
-// ============================================================================
+// ======================================================================
 // INDEPENDENT ATTESTATION SERVER (:8080)
-// ============================================================================
+// ======================================================================
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Subnet {
+    V4([u8; 3]), // /24
+    V6([u8; 8]), // /64
+}
+
+impl From<IpAddr> for Subnet {
+    fn from(ip: IpAddr) -> Self {
+        match ip {
+            IpAddr::V4(addr) => {
+                let octets = addr.octets();
+                Subnet::V4([octets[0], octets[1], octets[2]])
+            }
+            IpAddr::V6(addr) => {
+                let octets = addr.octets();
+                let mut prefix = [0u8; 8];
+                prefix.copy_from_slice(&octets[0..8]);
+                Subnet::V6(prefix)
+            }
+        }
+    }
+}
+
+struct SubnetState {
+    requests: std::collections::VecDeque<std::time::Instant>,
+    active_connections: u32,
+}
+
+struct PerSubnetLimiter {
+    subnets: std::sync::Mutex<std::collections::HashMap<Subnet, SubnetState>>,
+    max_requests: usize,
+    window: std::time::Duration,
+    max_concurrent: u32,
+}
+
+impl PerSubnetLimiter {
+    fn new(max_requests: usize, window: std::time::Duration, max_concurrent: u32) -> Self {
+        Self {
+            subnets: std::sync::Mutex::new(std::collections::HashMap::new()),
+            max_requests,
+            window,
+            max_concurrent,
+        }
+    }
+
+    fn acquire(self: &std::sync::Arc<Self>, ip: IpAddr) -> Result<SubnetPermit, &'static str> {
+        let subnet = Subnet::from(ip);
+        let mut map = self.subnets.lock().unwrap();
+        let now = std::time::Instant::now();
+
+        // Garbage collection to prevent memory leaks from millions of subnets
+        if map.len() > 10000 {
+            map.retain(|_, state| {
+                while let Some(&oldest) = state.requests.front() {
+                    if now.duration_since(oldest) > self.window {
+                        state.requests.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                state.active_connections > 0 || !state.requests.is_empty()
+            });
+        }
+
+        let state = map.entry(subnet.clone()).or_insert_with(|| SubnetState {
+            requests: std::collections::VecDeque::new(),
+            active_connections: 0,
+        });
+
+        while let Some(&oldest) = state.requests.front() {
+            if now.duration_since(oldest) > self.window {
+                state.requests.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        if state.requests.len() >= self.max_requests {
+            return Err("rate_limit_exceeded");
+        }
+
+        if state.active_connections >= self.max_concurrent {
+            return Err("concurrency_exceeded");
+        }
+
+        state.requests.push_back(now);
+        state.active_connections += 1;
+
+        Ok(SubnetPermit {
+            limiter: std::sync::Arc::clone(self),
+            subnet,
+        })
+    }
+}
+
+struct SubnetPermit {
+    limiter: std::sync::Arc<PerSubnetLimiter>,
+    subnet: Subnet,
+}
+
+impl Drop for SubnetPermit {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.limiter.subnets.lock() {
+            if let Some(state) = map.get_mut(&self.subnet) {
+                state.active_connections = state.active_connections.saturating_sub(1);
+            }
+        }
+    }
+}
+
 // This server is part of the measured bootloader (changes → different
 // LAUNCH_MEASUREMENT). It cannot be tampered with without detection.
 // It provides a hardware-rooted proof of what binary is running.
@@ -688,13 +802,22 @@ async fn run_attestation_server(payload_hash_hex: &str) {
     let payload_hash = payload_hash_hex.to_string();
     let mut consecutive_errors: u32 = 0;
 
+    // Strict Anti-DDoS protections
+    // Limit per subnet (IPv4 /24, IPv6 /64) to prevent organized spam while allowing legitimate load
+    let subnet_limiter = Arc::new(PerSubnetLimiter::new(10, std::time::Duration::from_secs(3), 2)); 
+    // Global hardware concurrency limit to protect /dev/sev-guest firmware queue
+    let global_hardware_limiter = Arc::new(tokio::sync::Semaphore::new(8)); 
+
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 consecutive_errors = 0; // Reset on success
                 let hash = payload_hash.clone();
+                let sl = subnet_limiter.clone();
+                let gl = global_hardware_limiter.clone();
+                let ip = addr.ip();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_attestation_connection(stream, &hash).await {
+                    if let Err(e) = handle_attestation_connection(stream, &hash, ip, sl, gl).await {
                         eprintln!("[ATTEST] Error from {}: {}", addr, e);
                     }
                 });
@@ -736,7 +859,24 @@ async fn run_attestation_server(payload_hash_hex: &str) {
 async fn handle_attestation_connection(
     mut stream: tokio::net::TcpStream,
     payload_hash_hex: &str,
+    ip: std::net::IpAddr,
+    subnet_limiter: Arc<PerSubnetLimiter>,
+    global_hardware_limiter: Arc<tokio::sync::Semaphore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Enforce Per-Subnet Limits (Rate + Concurrency)
+    // Dropping _subnet_permit automatically decrements the active concurrency connection count
+    let _subnet_permit = match subnet_limiter.acquire(ip) {
+        Ok(permit) => permit,
+        Err("rate_limit_exceeded") => {
+            send_http_response(&mut stream, 429, "application/json", r#"{"error":"too_many_requests","message":"Subnet rate limit exceeded"}"#).await?;
+            return Ok(());
+        }
+        Err(_) => {
+            send_http_response(&mut stream, 429, "application/json", r#"{"error":"too_many_requests","message":"Subnet concurrency limit exceeded"}"#).await?;
+            return Ok(());
+        }
+    };
+
     // Read the HTTP request in a loop until \r\n\r\n
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
@@ -822,6 +962,17 @@ async fn handle_attestation_connection(
     let mut report_data = [0u8; 64];
     report_data.copy_from_slice(report_data_hash.as_ref());
 
+    // 2. Enforce Global Hardware Concurrency Limit
+    // The hardware SEV guest device is a shared resource. We limit concurrent access
+    // to prevent hardware starvation or exhaustion of internal firmware resources.
+    let _hardware_permit = match global_hardware_limiter.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            send_http_response(&mut stream, 503, "application/json", r#"{"error":"server_busy","message":"Hardware attestation queue is full"}"#).await?;
+            return Ok(());
+        }
+    };
+
     use base64ct::{Base64Url, Encoding};
     // Request SEV-SNP attestation report from hardware
     let (report_b64, platform) = match get_snp_attestation_report(&report_data) {
@@ -902,9 +1053,9 @@ async fn send_http_response(
     Ok(())
 }
 
-// ============================================================================
+// ======================================================================
 // SEV-SNP ATTESTATION REPORT VIA IOCTL
-// ============================================================================
+// ======================================================================
 fn get_snp_attestation_report(report_data: &[u8; 64]) -> Result<Vec<u8>, String> {
     let dev_path = "/dev/sev-guest";
     if !Path::new(dev_path).exists() {
@@ -951,9 +1102,9 @@ fn get_snp_attestation_report(report_data: &[u8; 64]) -> Result<Vec<u8>, String>
     Ok(resp.data[..1184].to_vec())
 }
 
-// ============================================================================
+// ======================================================================
 // PANIC SHUTDOWN — IMMEDIATE POWER-OFF, NEVER RETURNS
-// ============================================================================
+// ======================================================================
 // Instead of hanging forever (which leaves a potentially compromised VM running),
 // we immediately power off the machine. This:
 //   1. Makes failures instantly detectable (server goes offline)
