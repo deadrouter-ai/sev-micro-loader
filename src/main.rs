@@ -10,6 +10,8 @@ use aws_lc_rs::signature::{UnparsedPublicKey, ECDSA_P384_SHA384_FIXED};
 use nix::mount::{mount, MsFlags};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use std::net::{Ipv4Addr, SocketAddr};
+use reqwest::dns::{Name, Resolve, Resolving};
 
 use mimalloc::MiMalloc;
 
@@ -89,8 +91,6 @@ async fn main() {
     if args.len() == 3 && args[1] == "run-attestation-server" {
         let payload_hash = args[2].clone();
         println!("[ATTEST] Starting isolated attestation server (PID {})", std::process::id());
-        
-        // Note: Privileges are now safely dropped via CommandExt::uid() and gid() by the parent process.
 
         run_attestation_server(&payload_hash).await;
         std::process::exit(0);
@@ -102,6 +102,8 @@ async fn main() {
     // STEP 1: PREPARE OS ENVIRONMENT (mount, network, DNS)
     // ======================================================================
     prepare_system_env();
+
+    wait_for_entropy();
 
     // Give kernel DHCP config time to complete, then verify connectivity.
     // The kernel's ip=dhcp runs before init, but link negotiation may lag.
@@ -140,16 +142,27 @@ async fn main() {
 
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(hardened_provider))
+    let mut tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(hardened_provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .unwrap_or_else(|e| panic_shutdown(&format!("TLS 1.3 configuration failed: {}", e)))
         .with_root_certificates(root_store)
         .with_no_client_auth();
+    tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+    let client_doh = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .use_preconfigured_tls(tls_config.clone())
+        .resolve("dns.mullvad.net", SocketAddr::new(IpAddr::V4(Ipv4Addr::new(194, 242, 2, 2)), 443))
+        .build()
+        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to build DoH HTTP client: {:?}", e)));
+
+    let custom_resolver = std::sync::Arc::new(CustomDohResolver { doh_client: client_doh });
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .connect_timeout(std::time::Duration::from_secs(30))
         .use_preconfigured_tls(tls_config)
+        .dns_resolver(custom_resolver)
         .build()
         .unwrap_or_else(|e| panic_shutdown(&format!("Failed to build HTTP client: {:?}", e)));
 
@@ -345,13 +358,8 @@ fn prepare_system_env() {
     // ethernet interfaces are UP.
     init_networking();
 
-    // DNS: ALWAYS use our trusted resolvers. Never trust DHCP-provided DNS.
-    // Quad9 (9.9.9.9) — privacy-focused, malware-blocking
-    // Cloudflare (1.1.1.1) — fallback
-    println!("[INIT] Configuring trusted DNS resolvers (Quad9 + Cloudflare)...");
-    let _ = std::fs::create_dir_all("/etc");
-    std::fs::write("/etc/resolv.conf", "nameserver 9.9.9.9\nnameserver 1.1.1.1\n")
-        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to write /etc/resolv.conf: {}", e)));
+    // DNS: Bypass kernel DNS. We use a custom DoH resolver baked in.
+    println!("[INIT] Bypassing kernel DNS. Custom DoH resolver will be used.");
 
     apply_kernel_hardening();
 
@@ -662,7 +670,7 @@ async fn download_with_retry(client: &reqwest::Client, url: &str, desc: &str) ->
                 }
             }
             Err(e) => {
-                last_error = format!("Connection failed: {}", e);
+                last_error = format!("Connection failed: {:?}", e);
                 eprintln!("[WARN] {}", last_error);
                 continue;
             }
@@ -1127,4 +1135,112 @@ fn panic_shutdown(message: &str) -> ! {
 
     // If reboot() somehow fails (should never happen for PID 1), abort hard
     std::process::abort();
+}
+
+// ======================================================================
+// CUSTOM DOH RESOLVER
+// ======================================================================
+struct CustomDohResolver {
+    doh_client: reqwest::Client,
+}
+
+impl Resolve for CustomDohResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let domain = name.as_str().to_string();
+        let doh_client = self.doh_client.clone();
+        
+        Box::pin(async move {
+            println!("[DNS] Resolving {} via DoH...", domain);
+            let q = build_a_record_query(&domain);
+            let res = doh_client.post("https://dns.mullvad.net/dns-query")
+                .header("Content-Type", "application/dns-message")
+                .header("Accept", "application/dns-message")
+                .body(q)
+                .send()
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                    println!("[DNS] DoH query failed: {:?}", e);
+                    Box::new(e)
+                })?
+                .bytes()
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                    println!("[DNS] DoH body read failed: {:?}", e);
+                    Box::new(e)
+                })?;
+                
+            let ip = parse_dns_response(&res)
+                .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+                    Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "No A record found via DoH"))
+                })?;
+            println!("[DNS] {} -> {}", domain, ip);
+                
+            let addrs: Box<dyn Iterator<Item = SocketAddr> + Send> = Box::new(std::iter::once(SocketAddr::new(ip, 0)));
+            Ok(addrs)
+        })
+    }
+}
+
+fn build_a_record_query(domain: &str) -> Vec<u8> {
+    let mut query = Vec::new();
+    query.extend_from_slice(&[0xab, 0xcd, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    for part in domain.split('.') {
+        query.push(part.len() as u8);
+        query.extend_from_slice(part.as_bytes());
+    }
+    query.push(0);
+    query.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+    query
+}
+
+fn parse_dns_response(data: &[u8]) -> Option<IpAddr> {
+    if data.len() < 12 { return None; }
+    let ancount = u16::from_be_bytes([data[6], data[7]]);
+    let mut offset = 12;
+    // skip question
+    while offset < data.len() && data[offset] != 0 {
+        offset += data[offset] as usize + 1;
+    }
+    offset += 1 + 4; // null byte + QTYPE + QCLASS
+    for _ in 0..ancount {
+        if offset + 12 > data.len() { break; }
+        if data[offset] & 0xC0 == 0xC0 {
+            offset += 2;
+        } else {
+            while offset < data.len() && data[offset] != 0 {
+                if data[offset] & 0xC0 == 0xC0 { offset += 2; break; }
+                offset += data[offset] as usize + 1;
+            }
+            if data[offset] == 0 { offset += 1; }
+        }
+        if offset + 10 > data.len() { break; }
+        let atype = u16::from_be_bytes([data[offset], data[offset+1]]);
+        let rdlength = u16::from_be_bytes([data[offset+8], data[offset+9]]) as usize;
+        offset += 10;
+        if atype == 1 && rdlength == 4 && offset + 4 <= data.len() {
+            return Some(IpAddr::V4(Ipv4Addr::new(
+                data[offset], data[offset+1], data[offset+2], data[offset+3]
+            )));
+        }
+        offset += rdlength;
+    }
+    None
+}
+
+fn wait_for_entropy() {
+    println!("[INIT] Waiting for kernel entropy pool (CRNG) to initialize...");
+    let mut file = match std::fs::File::open("/dev/random") {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("[WARN] Failed to open /dev/random: {}. Continuing anyway...", e);
+            return;
+        }
+    };
+    let mut buf = [0u8; 1];
+    use std::io::Read;
+    if let Err(e) = file.read_exact(&mut buf) {
+        eprintln!("[WARN] Failed to read from /dev/random: {}. Continuing anyway...", e);
+    } else {
+        println!("[INIT] Entropy pool ready.");
+    }
 }

@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 # Pure Rust async runtime and network client
 tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "fs", "time", "net", "io-util", "signal", "process", "full"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
 mimalloc = { version = "*", features = ["secure"] }
 
 # Embedded TLS root certificates (Mozilla CA store baked into the binary)

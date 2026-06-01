@@ -1,6 +1,5 @@
 /target
-/linux-6.12.91
-/linux-kernel
+/linux-*
 /rootfs
 zero_trust_os.cpio
 linux.tar.xz
