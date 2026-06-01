@@ -210,7 +210,7 @@ qemu-system-x86_64 \
     -kernel linux-kernel/arch/x86/boot/bzImage \
     -initrd zero_trust_os.cpio \
     -m 1024 -nographic -no-reboot \
-    -append "console=ttyS0 ip=dhcp mitigations=auto,nosmt spectre_v2=on pti=on gather_data_sampling=force" \
+    -append "console=ttyS0 ip=dhcp mitigations=auto,nosmt spectre_v2=on pti=on gather_data_sampling=force fips=1" \
     -netdev user,id=net0,hostfwd=tcp::8080-:8080 \
     -device virtio-net-pci,netdev=net0
 ```

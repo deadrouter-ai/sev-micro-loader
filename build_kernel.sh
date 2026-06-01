@@ -169,6 +169,9 @@ scripts/config --disable CONFIG_DEVPORT
 scripts/config --enable CONFIG_SLUB_DEBUG
 scripts/config --enable CONFIG_SLUB_DEBUG_ON
 
+# 14. Enable FIPS 140-2/3 mode
+scripts/config --enable CONFIG_CRYPTO_FIPS
+
 echo "Resolving dependencies and finalizing configuration..."
 make olddefconfig
 

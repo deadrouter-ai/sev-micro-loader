@@ -28,7 +28,7 @@
     <loader readonly="yes" type="pflash">/usr/share/edk2/ovmf/OVMF.amdsev.fd</loader>
     <kernel>/var/lib/libvirt/images/custom_tenant/bzImage</kernel>
     <initrd>/var/lib/libvirt/images/custom_tenant/zero_trust_os.cpio</initrd>
-    <cmdline>console=ttyS0 ip=dhcp quiet loglevel=0 random.trust_cpu=on random.trust_bootloader=off amd_iommu=force_isolation iommu.strict=1 iommu.passthrough=0 mitigations=auto,nosmt spectre_v2=on pti=on gather_data_sampling=force srso=safe-ret retbleed=auto,nosmt lockdown=confidentiality</cmdline>
+    <cmdline>console=ttyS0 ip=dhcp quiet loglevel=0 random.trust_cpu=on random.trust_bootloader=off amd_iommu=force_isolation iommu.strict=1 iommu.passthrough=0 mitigations=auto,nosmt spectre_v2=on pti=on gather_data_sampling=force srso=safe-ret retbleed=auto,nosmt fips=1 lockdown=confidentiality</cmdline>
   </os>
 
   <clock offset="utc">
