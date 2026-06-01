@@ -9,7 +9,6 @@ use aws_lc_rs::digest::{Context, SHA384};
 use aws_lc_rs::signature::{ECDSA_P384_SHA384_FIXED, UnparsedPublicKey};
 use std::fs::Permissions;
 use std::io::Write;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -22,7 +21,7 @@ use crate::config::{
     SIGNATURE_URL, TARGET_PATH,
 };
 use crate::crypto::{download_with_retry, wait_for_entropy};
-use crate::dns::{CustomDohResolver, query_mullvad_secure_date, resolve_domain_via_doh};
+use crate::dns::{CustomDnscryptResolver, query_mullvad_secure_date, resolve_domain_via_dnscrypt};
 use crate::system::{check_network_ready, lockdown_filesystem, prepare_system_env};
 use crate::time::{
     LAST_KNOWN_GOOD_TIME_MICROS, ROUGHTIME_SERVERS, RoughtimeServer, enforce_time_floor,
@@ -119,35 +118,25 @@ async fn main() {
         .with_no_client_auth();
     tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-    let client_doh = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .use_preconfigured_tls(tls_config.clone())
-        .resolve(
-            "dns.mullvad.net",
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(194, 242, 2, 2)), 443),
-        )
-        .build()
-        .unwrap_or_else(|e| panic_shutdown(&format!("Failed to build DoH HTTP client: {:?}", e)));
-
     // ======================================================================
     // ROUGHTIME SECURE TIME SYNCHRONIZATION WITH TLS DATE FALLBACK
     // ======================================================================
     let mut resolved_servers = Vec::new();
-    let mut doh_fallback_time = None;
+    let mut dnscrypt_fallback_time = None;
 
     for srv in ROUGHTIME_SERVERS {
         let srv: &RoughtimeServer = srv;
-        match resolve_domain_via_doh(&client_doh, srv.host).await {
+        match resolve_domain_via_dnscrypt(srv.host).await {
             Ok((ip, fb_time)) => {
                 println!("[DNS] Resolved {} to {}", srv.host, ip);
                 resolved_servers.push((*srv, ip));
-                if fb_time.is_some() && doh_fallback_time.is_none() {
-                    doh_fallback_time = fb_time;
+                if fb_time.is_some() && dnscrypt_fallback_time.is_none() {
+                    dnscrypt_fallback_time = fb_time;
                 }
             }
             Err(e) => {
                 eprintln!(
-                    "[WARN] Failed to resolve {} via DoH: {}. Using hardcoded fallback IP.",
+                    "[WARN] Failed to resolve {} via DNSCrypt: {}. Using hardcoded fallback IP.",
                     srv.host, e
                 );
                 let fallback_ip = match srv.name {
@@ -173,7 +162,7 @@ async fn main() {
                 "[WARN] Failed to retrieve secure time from Roughtime: {}",
                 e
             );
-            if let Some(fb_time) = doh_fallback_time {
+            if let Some(fb_time) = dnscrypt_fallback_time {
                 println!(
                     "[TIME] Falling back to secure TLS Date header timestamp: {}s",
                     fb_time
@@ -181,9 +170,9 @@ async fn main() {
                 Some(fb_time * 1_000_000)
             } else {
                 println!(
-                    "[TIME] Mullvad DoH returned no Date header. Querying Mullvad secure connection check date..."
+                    "[TIME] Querying Mullvad secure connection check date..."
                 );
-                query_mullvad_secure_date(&client_doh, tls_config.clone())
+                query_mullvad_secure_date(tls_config.clone())
                     .await
                     .map(|fb_time| fb_time * 1_000_000)
             }
@@ -219,9 +208,7 @@ async fn main() {
     }
     println!("[TIME] System clock updated: {}s", secs);
 
-    let custom_resolver = std::sync::Arc::new(CustomDohResolver {
-        doh_client: client_doh,
-    });
+    let custom_resolver = std::sync::Arc::new(CustomDnscryptResolver::new());
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
@@ -265,14 +252,26 @@ async fn main() {
     println!("[INIT] Performing ECDSA P-384 signature verification...");
     let verifying_key = UnparsedPublicKey::new(&ECDSA_P384_SHA384_FIXED, &PUBLIC_KEY_BYTES);
 
-    if verifying_key.verify(&app_bytes, &sig_bytes).is_err() {
+    // ======================================================================
+    // VOLTAGE FAULT INJECTION (INSTRUCTION SKIPPING) MITIGATION
+    // ======================================================================
+    // By inducing a transient hardware fault, an attacker controlling the 
+    // physical motherboard might force the CPU to miscalculate a branch condition
+    // or skip an instruction entirely. To mitigate this highly complex attack
+    // against the single most sensitive task (server verification), we introduce 
+    // structural redundancy by performing the check 3 times.
+    let valid1 = verifying_key.verify(&app_bytes, &sig_bytes).is_ok();
+    let valid2 = verifying_key.verify(&app_bytes, &sig_bytes).is_ok();
+    let valid3 = verifying_key.verify(&app_bytes, &sig_bytes).is_ok();
+
+    if !valid1 || !valid2 || !valid3 {
         panic_shutdown(
             "CRITICAL: Signature verification FAILED!\n\
              Binary does NOT match the trusted signing key.\n\
              System shutting down to prevent execution of untrusted code.",
         );
     }
-    println!("[INIT] Signature verification PASSED.");
+    println!("[INIT] Signature verification PASSED (3/3 redundant checks).");
 
     // ======================================================================
     // STEP 5: DEPLOY BINARY TO ISOLATED READ-ONLY TMPFS

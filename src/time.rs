@@ -440,7 +440,7 @@ pub async fn query_single_roughtime(
             continue;
         }
 
-        match timeout(Duration::from_millis(3000), socket.recv_from(&mut buf)).await {
+        match timeout(Duration::from_millis(15000), socket.recv_from(&mut buf)).await {
             Ok(Ok((bytes_recvd, _src))) => {
                 n = bytes_recvd;
                 received = true;
@@ -650,7 +650,7 @@ mod tests {
             Ok(s) => s,
             Err(_) => return,
         };
-        if socket.set_read_timeout(Some(Duration::from_secs(3))).is_err() {
+        if socket.set_read_timeout(Some(Duration::from_secs(15))).is_err() {
             return;
         }
 
