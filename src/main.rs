@@ -87,6 +87,10 @@ struct SnpReportResp {
 
 #[tokio::main]
 async fn main() {
+    unsafe {
+        let _ = libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE | libc::MCL_ONFAULT);
+    }
+
     let args: Vec<String> = std::env::args().collect();
     if args.len() == 3 && args[1] == "run-attestation-server" {
         let payload_hash = args[2].clone();
@@ -128,11 +132,12 @@ async fn main() {
             rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384,
         ],
         kx_groups: vec![
-            rustls::crypto::aws_lc_rs::kx_group::SECP256R1MLKEM768,
             rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768,
+            rustls::crypto::aws_lc_rs::kx_group::SECP256R1MLKEM768,
             rustls::crypto::aws_lc_rs::kx_group::MLKEM1024,
             rustls::crypto::aws_lc_rs::kx_group::MLKEM768,
             rustls::crypto::aws_lc_rs::kx_group::SECP384R1,
+            rustls::crypto::aws_lc_rs::kx_group::X25519,
             rustls::crypto::aws_lc_rs::kx_group::SECP256R1,
         ],
         ..rustls::crypto::aws_lc_rs::default_provider()
@@ -230,13 +235,11 @@ async fn main() {
     // execute anything it writes (noexec on all writable mounts).
     println!("[INIT] Spawning server as child process...");
 
-    // A pre-exec closure that locks down the child process's memory.
+    // A pre-exec closure that locks down the child process.
     // It runs after fork but before exec. Errors are ignored to ensure it never crashes.
     fn secure_memory_setup() -> std::io::Result<()> {
         unsafe {
-            // 1. Lock memory into RAM to prevent swapping.
-            libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
-            // 2. Disable ptrace and core dumps to protect RAM from other processes.
+            // Disable ptrace and core dumps to protect RAM from other processes.
             libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
         }
         Ok(())
@@ -652,22 +655,41 @@ async fn download_with_retry(client: &reqwest::Client, url: &str, desc: &str) ->
                     eprintln!("[WARN] {}", last_error);
                     continue;
                 }
-                match response.bytes().await {
-                    Ok(bytes) if bytes.is_empty() => {
-                        last_error = format!("Empty response for {}", desc);
-                        eprintln!("[WARN] {}", last_error);
-                        continue;
-                    }
-                    Ok(bytes) => {
-                        println!("[INIT] Downloaded {} ({} bytes)", desc, bytes.len());
-                        return bytes.to_vec();
-                    }
+                let mut response = response;
+                let mut bytes = Vec::new();
+                let mut limit_exceeded = false;
+                let mut read_err = None;
+                while let Some(chunk) = match response.chunk().await {
+                    Ok(c) => c,
                     Err(e) => {
-                        last_error = format!("Body read failed: {}", e);
-                        eprintln!("[WARN] {}", last_error);
-                        continue;
+                        read_err = Some(e);
+                        None
                     }
+                } {
+                    if bytes.len() + chunk.len() > 100 * 1024 * 1024 {
+                        limit_exceeded = true;
+                        break;
+                    }
+                    bytes.extend_from_slice(&chunk);
                 }
+
+                if limit_exceeded {
+                    last_error = format!("Response size limit exceeded (max 100MB) for {}", desc);
+                    eprintln!("[WARN] {}", last_error);
+                    continue;
+                }
+                if let Some(e) = read_err {
+                    last_error = format!("Body read failed: {}", e);
+                    eprintln!("[WARN] {}", last_error);
+                    continue;
+                }
+                if bytes.is_empty() {
+                    last_error = format!("Empty response for {}", desc);
+                    eprintln!("[WARN] {}", last_error);
+                    continue;
+                }
+                println!("[INIT] Downloaded {} ({} bytes)", desc, bytes.len());
+                return bytes;
             }
             Err(e) => {
                 last_error = format!("Connection failed: {:?}", e);
@@ -1152,7 +1174,7 @@ impl Resolve for CustomDohResolver {
         Box::pin(async move {
             println!("[DNS] Resolving {} via DoH...", domain);
             let q = build_a_record_query(&domain);
-            let res = doh_client.post("https://dns.mullvad.net/dns-query")
+            let mut res_opt = doh_client.post("https://dns.mullvad.net/dns-query")
                 .header("Content-Type", "application/dns-message")
                 .header("Accept", "application/dns-message")
                 .body(q)
@@ -1161,13 +1183,19 @@ impl Resolve for CustomDohResolver {
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                     println!("[DNS] DoH query failed: {:?}", e);
                     Box::new(e)
-                })?
-                .bytes()
-                .await
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                    println!("[DNS] DoH body read failed: {:?}", e);
-                    Box::new(e)
                 })?;
+
+            let mut res = Vec::new();
+            while let Some(chunk) = res_opt.chunk().await.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                println!("[DNS] DoH body read failed: {:?}", e);
+                Box::new(e)
+            })? {
+                if res.len() + chunk.len() > 65536 {
+                    println!("[DNS] DoH response too large");
+                    return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "DoH response too large")) as Box<dyn std::error::Error + Send + Sync>);
+                }
+                res.extend_from_slice(&chunk);
+            }
                 
             let ip = parse_dns_response(&res)
                 .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
@@ -1211,7 +1239,7 @@ fn parse_dns_response(data: &[u8]) -> Option<IpAddr> {
                 if data[offset] & 0xC0 == 0xC0 { offset += 2; break; }
                 offset += data[offset] as usize + 1;
             }
-            if data[offset] == 0 { offset += 1; }
+            if offset < data.len() && data[offset] == 0 { offset += 1; }
         }
         if offset + 10 > data.len() { break; }
         let atype = u16::from_be_bytes([data[offset], data[offset+1]]);
