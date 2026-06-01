@@ -163,7 +163,7 @@ fn xchacha20_djb_poly1305_decrypt(
 
     let computed_tag = Poly1305::new(&poly_key.into()).compute_unpadded(ciphertext);
 
-    if &computed_tag[..] != tag {
+    if aws_lc_rs::constant_time::verify_slices_are_equal(&computed_tag[..], tag).is_err() {
         return Err("Poly1305 authentication failed".to_string());
     }
 

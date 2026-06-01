@@ -260,16 +260,14 @@ async fn main() {
     // or skip an instruction entirely. To mitigate this highly complex attack
     // against the single most sensitive task (server verification), we introduce 
     // structural redundancy by performing the check 3 times.
-    let valid1 = verifying_key.verify(&app_bytes, &sig_bytes).is_ok();
-    let valid2 = verifying_key.verify(&app_bytes, &sig_bytes).is_ok();
-    let valid3 = verifying_key.verify(&app_bytes, &sig_bytes).is_ok();
+    let valid1 = std::hint::black_box(verifying_key.verify(&app_bytes, &sig_bytes).is_ok());
+    let valid2 = std::hint::black_box(verifying_key.verify(&app_bytes, &sig_bytes).is_ok());
+    let valid3 = std::hint::black_box(verifying_key.verify(&app_bytes, &sig_bytes).is_ok());
 
-    if !valid1 || !valid2 || !valid3 {
-        panic_shutdown(
-            "CRITICAL: Signature verification FAILED!\n\
+    if !std::hint::black_box(valid1) || !std::hint::black_box(valid2) || !std::hint::black_box(valid3) {
+        panic_shutdown("CRITICAL: Signature verification FAILED!\n\
              Binary does NOT match the trusted signing key.\n\
-             System shutting down to prevent execution of untrusted code.",
-        );
+             System shutting down to prevent execution of untrusted code.");
     }
     println!("[INIT] Signature verification PASSED (3/3 redundant checks).");
 
